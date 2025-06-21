@@ -1,0 +1,1 @@
+<!DOCTYPE html><html><body><h2>Scan</h2><video id='preview'></video></body></html>
