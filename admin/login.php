@@ -1,32 +1,37 @@
 <?php
-$ip = $_SERVER['REMOTE_ADDR'];
-$geo = json_decode(file_get_contents("http://ip-api.com/json/{$ip}"));
-
-if (!in_array($geo->countryCode, ['US', 'CA'])) {
-    die("Access restricted to users in the United States and Canada.");
-}
-?>
-<?php
 session_start();
+require_once '../includes/db.php';
+
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $user = $_POST['username'];
-    $pass = $_POST['password'];
+    $username = $_POST['username'] ?? '';
+    $password = $_POST['password'] ?? '';
 
-    // Replace this with DB check if needed
-    if ($user === 'admin' && $pass === 'password123') {
+    $pdo = getDbConnection();
+    $stmt = $pdo->prepare("SELECT * FROM admins WHERE username = ?");
+    $stmt->execute([$username]);
+    $admin = $stmt->fetch();
+
+    if ($admin && password_verify($password, $admin['password'])) {
         $_SESSION['admin_logged_in'] = true;
-        header('Location: ../public/index.php');
-        exit();
+        header("Location: dashboard.php");
+        exit;
     } else {
-        $error = 'Invalid credentials';
+        $error = "Invalid credentials.";
     }
 }
 ?>
-<form method="post">
-    <h2>Admin Login</h2>
-    <label>Username: <input type="text" name="username"></label><br>
-    <label>Password: <input type="password" name="password"></label><br>
-    <button type="submit">Login</button>
-    <p style="color:red;"><?php echo $error; ?></p>
-</form>
+
+<!DOCTYPE html>
+<html>
+<head><title>Admin Login</title></head>
+<body>
+    <h2>Login</h2>
+    <?php if ($error): ?><p style="color:red"><?= $error ?></p><?php endif; ?>
+    <form method="post">
+        <label>Username: <input type="text" name="username" required></label><br>
+        <label>Password: <input type="password" name="password" required></label><br>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>
