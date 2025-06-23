@@ -9,6 +9,20 @@ if (!isset($_SESSION['admin_logged_in'])) {
     exit;
 }
 ?>
-
-<h2>Welcome to your Media Collection</h2>
-<a href="admin/logout.php">Logout</a>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Media Collection</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container mt-5">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Media Collection</h2>
+        <a href="admin/logout.php" class="btn btn-outline-danger">Logout</a>
+    </div>
+    <p>This will be your main dashboard.</p>
+</div>
+</body>
+</html>
