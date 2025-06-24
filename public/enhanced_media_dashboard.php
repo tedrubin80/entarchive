@@ -1,7 +1,8 @@
 <?php
 /**
  * Enhanced Personal Media Management Dashboard
- * CLZ.com-style dashboard with robust error handling and user-specific features
+ * File: public/enhanced_media_dashboard.php
+ * Main dashboard with robust error handling and proper authentication flow
  */
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -12,6 +13,19 @@ session_start();
 // Configuration - Debug mode for development
 define('DEBUG_MODE', true);
 define('ALLOW_DEMO_LOGIN', true); // Set false in production
+
+// Check authentication FIRST - redirect if not logged in
+if (!isset($_SESSION['admin_logged_in']) || !$_SESSION['admin_logged_in']) {
+    header("Location: user_login.php");
+    exit;
+}
+
+// Handle logout
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header("Location: user_login.php?logout=1");
+    exit;
+}
 
 // Helper functions
 function debugLog($message, $data = null) {
@@ -48,7 +62,7 @@ function safeInclude($file, $required = false) {
 // Initialize system status variables
 $systemStatus = [
     'database' => false,
-    'auth' => false,
+    'auth' => true, // Already verified above
     'config' => false,
     'geo' => true // Default to true unless geo restrictions needed
 ];
@@ -68,7 +82,7 @@ $stats = [
 $recentItems = [];
 $pdo = null;
 
-debugLog("Dashboard initialization started");
+debugLog("Dashboard initialization started for user: " . ($_SESSION['admin_user'] ?? 'unknown'));
 
 // 1. Load Configuration
 try {
@@ -116,88 +130,46 @@ if ($systemStatus['config']) {
     }
 }
 
-// 3. Authentication Check
-$isAuthenticated = isset($_SESSION['user_id']) || isset($_SESSION['admin_logged_in']);
-if ($isAuthenticated) {
-    $systemStatus['auth'] = true;
-    $currentUser = $_SESSION['username'] ?? $_SESSION['admin_user'] ?? 'User';
-    debugLog("User authenticated: " . $currentUser);
-} else {
-    debugLog("User not authenticated");
-}
-
-// 4. Handle demo/quick login (development only)
-if (DEBUG_MODE && ALLOW_DEMO_LOGIN && isset($_POST['demo_login'])) {
-    $_SESSION['admin_logged_in'] = true;
-    $_SESSION['admin_user'] = 'Demo User';
-    $systemStatus['auth'] = true;
-    $isAuthenticated = true;
-    $currentUser = 'Demo User';
-    header("Location: " . $_SERVER['PHP_SELF']);
-    exit;
-}
-
-// 5. Load Statistics and Recent Items
-if ($systemStatus['database'] && $systemStatus['auth']) {
+// 3. Load Statistics and Recent Items
+if ($systemStatus['database']) {
     try {
-        // Get collection statistics
-        $statQuery = "
-            SELECT 
-                media_type,
-                COUNT(*) as count,
-                COALESCE(SUM(CAST(current_value AS DECIMAL(10,2))), 0) as total_value
-            FROM collection 
-            WHERE user_id = :user_id OR user_id IS NULL
-            GROUP BY media_type
-        ";
+        // Get collection statistics - handle missing tables gracefully
+        $statQueries = [
+            'movies' => "SELECT COUNT(*) FROM collection WHERE media_type = 'movie'",
+            'books' => "SELECT COUNT(*) FROM collection WHERE media_type = 'book'",
+            'comics' => "SELECT COUNT(*) FROM collection WHERE media_type = 'comic'",
+            'music' => "SELECT COUNT(*) FROM collection WHERE media_type = 'music'",
+            'games' => "SELECT COUNT(*) FROM collection WHERE media_type = 'game'",
+            'total_items' => "SELECT COUNT(*) FROM collection",
+            'total_value' => "SELECT COALESCE(SUM(CAST(current_value AS DECIMAL(10,2))), 0) FROM collection",
+            'wishlist_items' => "SELECT COUNT(*) FROM wishlist",
+            'recently_added' => "SELECT COUNT(*) FROM collection WHERE DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
+        ];
         
-        $userId = $_SESSION['user_id'] ?? 1; // Default to 1 for single-user setups
-        
-        if (in_array('collection', $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN))) {
-            $stmt = $pdo->prepare($statQuery);
-            $stmt->execute(['user_id' => $userId]);
-            
-            while ($row = $stmt->fetch()) {
-                $type = strtolower($row['media_type']);
-                $stats[$type] = $row['count'];
-                $stats['total_value'] += $row['total_value'];
-                $stats['total_items'] += $row['count'];
+        foreach ($statQueries as $key => $query) {
+            try {
+                $result = $pdo->query($query);
+                $stats[$key] = $result->fetchColumn() ?: 0;
+            } catch (PDOException $e) {
+                debugLog("Query failed for {$key}: " . $e->getMessage());
+                // Keep default value of 0
             }
-            
-            // Get recent items
-            $recentQuery = "
-                SELECT id, title, media_type, creator, created_at, 
-                       poster_url, current_value
-                FROM collection 
-                WHERE user_id = :user_id OR user_id IS NULL
-                ORDER BY created_at DESC 
-                LIMIT 8
-            ";
-            
-            $stmt = $pdo->prepare($recentQuery);
-            $stmt->execute(['user_id' => $userId]);
-            $recentItems = $stmt->fetchAll();
-            
-            $stats['recently_added'] = count($recentItems);
         }
         
-        // Get wishlist count
-        if (in_array('wishlist', $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN))) {
-            $stmt = $pdo->prepare("SELECT COUNT(*) as count FROM wishlist WHERE user_id = :user_id OR user_id IS NULL");
-            $stmt->execute(['user_id' => $userId]);
-            $stats['wishlist_items'] = $stmt->fetch()['count'];
+        // Get recent items
+        try {
+            $recentQuery = "SELECT title, media_type, created_at FROM collection ORDER BY created_at DESC LIMIT 5";
+            $recentItems = $pdo->query($recentQuery)->fetchAll();
+        } catch (PDOException $e) {
+            debugLog("Recent items query failed: " . $e->getMessage());
         }
         
-        debugLog("Statistics loaded", $stats);
-        
-    } catch (PDOException $e) {
-        $errors[] = "Failed to load statistics: " . $e->getMessage();
-        debugLog("Statistics error: " . $e->getMessage());
+    } catch (Exception $e) {
+        $errors[] = "Statistics loading error: " . $e->getMessage();
     }
 }
 
-// 6. Check for system readiness
-$systemReady = $systemStatus['database'] && $systemStatus['auth'] && $systemStatus['config'];
+$currentUser = $_SESSION['admin_user'] ?? 'User';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -205,7 +177,6 @@ $systemReady = $systemStatus['database'] && $systemStatus['auth'] && $systemStat
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Media Collection Dashboard</title>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -214,7 +185,7 @@ $systemReady = $systemStatus['database'] && $systemStatus['auth'] && $systemStat
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             line-height: 1.6;
@@ -222,139 +193,128 @@ $systemReady = $systemStatus['database'] && $systemStatus['auth'] && $systemStat
         
         .header {
             background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(20px);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-            padding: 1.5rem 2rem;
-            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
-        }
-        
-        .header-content {
-            max-width: 1400px;
-            margin: 0 auto;
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
+            gap: 1rem;
+        }
+        
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
         }
         
         .header h1 {
-            font-size: 2rem;
-            color: #2c3e50;
-            margin-bottom: 0.5rem;
+            color: #333;
+            font-size: 1.8rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
         
-        .header-subtitle {
-            color: #7f8c8d;
+        .user-info {
+            background: #f8f9fa;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
             font-size: 0.9rem;
+            color: #495057;
         }
         
         .status-indicators {
             display: flex;
             gap: 0.5rem;
-            margin-top: 0.5rem;
+            flex-wrap: wrap;
         }
         
         .status-badge {
-            padding: 0.25rem 0.75rem;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
         
         .status-success {
             background: #d4edda;
             color: #155724;
-            border: 1px solid #c3e6cb;
         }
         
         .status-error {
             background: #f8d7da;
             color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-        
-        .status-warning {
-            background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeaa7;
         }
         
         .header-actions {
             display: flex;
-            gap: 0.75rem;
-            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
         }
         
         .btn {
-            padding: 0.75rem 1.5rem;
+            padding: 0.5rem 1rem;
             border: none;
-            border-radius: 8px;
-            font-weight: 600;
+            border-radius: 6px;
             text-decoration: none;
-            transition: all 0.3s ease;
+            font-weight: 500;
             cursor: pointer;
+            transition: all 0.3s ease;
             font-size: 0.9rem;
         }
         
         .btn-primary {
-            background: #3498db;
+            background: #007bff;
             color: white;
-        }
-        
-        .btn-primary:hover {
-            background: #2980b9;
-            transform: translateY(-2px);
         }
         
         .btn-secondary {
-            background: #95a5a6;
-            color: white;
-        }
-        
-        .btn-success {
-            background: #27ae60;
+            background: #6c757d;
             color: white;
         }
         
         .btn-danger {
-            background: #e74c3c;
+            background: #dc3545;
             color: white;
         }
         
+        .btn:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        
         .container {
-            max-width: 1400px;
+            max-width: 1200px;
             margin: 2rem auto;
-            padding: 0 1rem;
+            padding: 0 2rem;
         }
         
-        .alert {
-            padding: 1rem 1.5rem;
+        .error-panel {
+            background: rgba(248, 215, 218, 0.95);
+            border: 1px solid #f5c6cb;
             border-radius: 8px;
-            margin-bottom: 1.5rem;
-            border-left: 4px solid transparent;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
         }
         
-        .alert-error {
-            background: #f8d7da;
-            color: #721c24;
-            border-left-color: #dc3545;
+        .error-list {
+            list-style: none;
+            margin: 1rem 0;
         }
         
-        .alert-warning {
-            background: #fff3cd;
-            color: #856404;
-            border-left-color: #ffc107;
-        }
-        
-        .alert-info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border-left-color: #17a2b8;
+        .error-list li {
+            margin: 0.5rem 0;
+            padding-left: 1rem;
         }
         
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 1.5rem;
             margin-bottom: 2rem;
         }
@@ -364,489 +324,270 @@ $systemReady = $systemStatus['database'] && $systemStatus['auth'] && $systemStat
             border-radius: 12px;
             padding: 1.5rem;
             text-align: center;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             transition: transform 0.3s ease;
         }
         
         .stat-card:hover {
-            transform: translateY(-5px);
+            transform: translateY(-2px);
         }
         
         .stat-icon {
-            font-size: 2.5rem;
-            margin-bottom: 1rem;
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
         }
         
         .stat-number {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: #2c3e50;
-            margin-bottom: 0.5rem;
+            font-size: 2rem;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 0.25rem;
         }
         
         .stat-label {
-            color: #7f8c8d;
-            font-weight: 500;
-            text-transform: uppercase;
+            color: #666;
             font-size: 0.9rem;
+            text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         
-        .main-content {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 2rem;
-            margin-top: 2rem;
-        }
-        
-        .content-section {
+        .recent-items {
             background: rgba(255, 255, 255, 0.95);
             border-radius: 12px;
-            padding: 2rem;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
         
-        .section-title {
-            font-size: 1.5rem;
-            margin-bottom: 1.5rem;
-            color: #2c3e50;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        
-        .recent-items {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-            gap: 1rem;
+        .recent-items h3 {
+            margin-bottom: 1rem;
+            color: #333;
         }
         
         .recent-item {
-            text-align: center;
-            padding: 1rem;
-            border-radius: 8px;
-            background: #f8f9fa;
-            transition: transform 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #eee;
         }
         
-        .recent-item:hover {
-            transform: scale(1.05);
+        .recent-item:last-child {
+            border-bottom: none;
         }
         
-        .recent-item img {
-            width: 60px;
-            height: 80px;
-            object-fit: cover;
-            border-radius: 4px;
-            margin-bottom: 0.5rem;
+        .item-info {
+            flex-grow: 1;
         }
         
-        .recent-item-title {
+        .item-title {
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .item-type {
             font-size: 0.8rem;
-            font-weight: 600;
-            margin-bottom: 0.25rem;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            color: #666;
+            text-transform: capitalize;
         }
         
-        .recent-item-meta {
-            font-size: 0.7rem;
-            color: #6c757d;
+        .item-date {
+            font-size: 0.8rem;
+            color: #999;
+        }
+        
+        .debug-info {
+            background: rgba(255, 243, 205, 0.95);
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 2rem;
+            font-size: 0.85rem;
+            color: #856404;
         }
         
         .quick-actions {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 1rem;
+            margin-top: 2rem;
         }
         
         .action-card {
-            background: #f8f9fa;
-            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
             padding: 1.5rem;
             text-align: center;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            border: 2px solid transparent;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
         }
         
         .action-card:hover {
-            background: #e9ecef;
-            border-color: #3498db;
             transform: translateY(-2px);
         }
         
         .action-icon {
-            font-size: 2rem;
+            font-size: 3rem;
             margin-bottom: 1rem;
-            display: block;
         }
         
-        .demo-login {
-            background: #fff3cd;
-            border: 1px solid #ffeaa7;
-            border-radius: 8px;
-            padding: 1rem;
-            margin: 1rem 0;
+        .action-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 0.5rem;
         }
         
-        .debug-info {
-            background: #e7f3ff;
-            border: 1px solid #b8daff;
-            border-radius: 4px;
-            padding: 0.5rem;
-            margin: 0.5rem 0;
-            font-size: 0.8rem;
-            font-family: 'Courier New', monospace;
-        }
-        
-        @media (max-width: 768px) {
-            .header-content {
-                flex-direction: column;
-                text-align: center;
-            }
-            
-            .main-content {
-                grid-template-columns: 1fr;
-            }
-            
-            .stats-grid {
-                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            }
-            
-            .header-actions {
-                margin-top: 1rem;
-            }
-        }
-        
-        .hidden {
-            display: none !important;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 2rem;
-            color: #6c757d;
-        }
-        
-        .empty-state {
-            text-align: center;
-            padding: 3rem 1rem;
-            color: #6c757d;
-        }
-        
-        .empty-state i {
-            font-size: 4rem;
+        .action-desc {
+            color: #666;
+            font-size: 0.9rem;
             margin-bottom: 1rem;
-            opacity: 0.5;
         }
     </style>
 </head>
 <body>
     <header class="header">
-        <div class="header-content">
-            <div>
-                <h1><i class="fas fa-collections"></i> My Media Collection</h1>
-                <div class="header-subtitle">Personal Media Management System</div>
-                <div class="status-indicators">
-                    <span class="status-badge <?= $systemStatus['config'] ? 'status-success' : 'status-error' ?>">
-                        <i class="fas fa-<?= $systemStatus['config'] ? 'check' : 'times' ?>"></i> Config
-                    </span>
-                    <span class="status-badge <?= $systemStatus['database'] ? 'status-success' : 'status-error' ?>">
-                        <i class="fas fa-<?= $systemStatus['database'] ? 'database' : 'times' ?>"></i> Database
-                    </span>
-                    <span class="status-badge <?= $systemStatus['auth'] ? 'status-success' : 'status-warning' ?>">
-                        <i class="fas fa-<?= $systemStatus['auth'] ? 'user-check' : 'user-times' ?>"></i> 
-                        <?= $systemStatus['auth'] ? ($currentUser ?? 'Authenticated') : 'Not Logged In' ?>
-                    </span>
-                </div>
+        <div class="header-left">
+            <h1>📚 Media Collection</h1>
+            <div class="user-info">
+                👤 Welcome, <?php echo htmlspecialchars($currentUser); ?>
             </div>
-            
-            <div class="header-actions">
-                <?php if ($systemReady): ?>
-                    <a href="add.php" class="btn btn-primary">
-                        <i class="fas fa-plus"></i> Add Media
-                    </a>
-                    <a href="scan.php" class="btn btn-secondary">
-                        <i class="fas fa-qrcode"></i> Scan
-                    </a>
-                    <a href="search.php" class="btn btn-success">
-                        <i class="fas fa-search"></i> Search
-                    </a>
-                    <a href="logout.php" class="btn btn-danger">
-                        <i class="fas fa-sign-out-alt"></i> Logout
-                    </a>
-                <?php else: ?>
-                    <a href="login.php" class="btn btn-primary">
-                        <i class="fas fa-sign-in-alt"></i> Login
-                    </a>
-                <?php endif; ?>
-            </div>
+        </div>
+        
+        <div class="status-indicators">
+            <span class="status-badge <?php echo $systemStatus['config'] ? 'status-success' : 'status-error'; ?>">
+                <?php echo $systemStatus['config'] ? '✓' : '✗'; ?> Config
+            </span>
+            <span class="status-badge <?php echo $systemStatus['database'] ? 'status-success' : 'status-error'; ?>">
+                <?php echo $systemStatus['database'] ? '✓' : '✗'; ?> Database
+            </span>
+            <span class="status-badge status-success">
+                ✓ Auth
+            </span>
+        </div>
+        
+        <div class="header-actions">
+            <a href="user_add_item.php" class="btn btn-primary">➕ Add Media</a>
+            <a href="user_scanner.php" class="btn btn-secondary">📱 Scan</a>
+            <a href="?logout=1" class="btn btn-danger">🚪 Logout</a>
         </div>
     </header>
 
     <div class="container">
         <?php if (!empty($errors)): ?>
-            <div class="alert alert-error">
-                <h4><i class="fas fa-exclamation-triangle"></i> System Issues Detected</h4>
-                <ul style="margin: 0.5rem 0 0 1.5rem;">
+            <div class="error-panel">
+                <h2>🚨 System Status Issues</h2>
+                <p>The following issues were detected:</p>
+                <ul class="error-list">
                     <?php foreach ($errors as $error): ?>
-                        <li><?= htmlspecialchars($error) ?></li>
+                        <li>• <?php echo htmlspecialchars($error); ?></li>
                     <?php endforeach; ?>
                 </ul>
             </div>
         <?php endif; ?>
 
-        <?php if (!$systemStatus['auth'] && DEBUG_MODE && ALLOW_DEMO_LOGIN): ?>
-            <div class="demo-login">
-                <h4><i class="fas fa-code"></i> Development Mode</h4>
-                <p>Quick access for testing and development:</p>
-                <form method="post" style="margin-top: 0.5rem;">
-                    <button type="submit" name="demo_login" class="btn btn-warning">
-                        <i class="fas fa-user-cog"></i> Demo Login
-                    </button>
-                </form>
+        <!-- Statistics Dashboard -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">🎬</div>
+                <div class="stat-number"><?php echo number_format($stats['movies']); ?></div>
+                <div class="stat-label">Movies</div>
             </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">📚</div>
+                <div class="stat-number"><?php echo number_format($stats['books']); ?></div>
+                <div class="stat-label">Books</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">📖</div>
+                <div class="stat-number"><?php echo number_format($stats['comics']); ?></div>
+                <div class="stat-label">Comics</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">🎵</div>
+                <div class="stat-number"><?php echo number_format($stats['music']); ?></div>
+                <div class="stat-label">Music</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">🎮</div>
+                <div class="stat-number"><?php echo number_format($stats['games']); ?></div>
+                <div class="stat-label">Games</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">💰</div>
+                <div class="stat-number">$<?php echo number_format($stats['total_value'], 2); ?></div>
+                <div class="stat-label">Total Value</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">⭐</div>
+                <div class="stat-number"><?php echo number_format($stats['wishlist_items']); ?></div>
+                <div class="stat-label">Wishlist</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-icon">🆕</div>
+                <div class="stat-number"><?php echo number_format($stats['recently_added']); ?></div>
+                <div class="stat-label">This Week</div>
+            </div>
+        </div>
+
+        <!-- Recent Items -->
+        <?php if (!empty($recentItems)): ?>
+        <div class="recent-items">
+            <h3>📋 Recently Added Items</h3>
+            <?php foreach ($recentItems as $item): ?>
+            <div class="recent-item">
+                <div class="item-info">
+                    <div class="item-title"><?php echo htmlspecialchars($item['title']); ?></div>
+                    <div class="item-type"><?php echo htmlspecialchars($item['media_type']); ?></div>
+                </div>
+                <div class="item-date">
+                    <?php echo date('M j, Y', strtotime($item['created_at'])); ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
         <?php endif; ?>
 
-        <?php if ($systemReady): ?>
-            <!-- Statistics Dashboard -->
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-icon">🎬</div>
-                    <div class="stat-number"><?= number_format($stats['movies']) ?></div>
-                    <div class="stat-label">Movies</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">📚</div>
-                    <div class="stat-number"><?= number_format($stats['books']) ?></div>
-                    <div class="stat-label">Books</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">📖</div>
-                    <div class="stat-number"><?= number_format($stats['comics']) ?></div>
-                    <div class="stat-label">Comics</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🎵</div>
-                    <div class="stat-number"><?= number_format($stats['music']) ?></div>
-                    <div class="stat-label">Music</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">🎮</div>
-                    <div class="stat-number"><?= number_format($stats['games']) ?></div>
-                    <div class="stat-label">Games</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">💰</div>
-                    <div class="stat-number">$<?= number_format($stats['total_value'], 2) ?></div>
-                    <div class="stat-label">Total Value</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">⭐</div>
-                    <div class="stat-number"><?= number_format($stats['wishlist_items']) ?></div>
-                    <div class="stat-label">Wishlist</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-icon">📊</div>
-                    <div class="stat-number"><?= number_format($stats['total_items']) ?></div>
-                    <div class="stat-label">Total Items</div>
-                </div>
+        <!-- Quick Actions -->
+        <div class="quick-actions">
+            <div class="action-card">
+                <div class="action-icon">🔍</div>
+                <div class="action-title">Search Collection</div>
+                <div class="action-desc">Find items in your collection</div>
+                <a href="user_search.php" class="btn btn-primary">Search</a>
             </div>
-
-            <div class="main-content">
-                <!-- Recent Items -->
-                <div class="content-section">
-                    <h2 class="section-title">
-                        <i class="fas fa-clock"></i> Recently Added
-                    </h2>
-                    
-                    <?php if (!empty($recentItems)): ?>
-                        <div class="recent-items">
-                            <?php foreach ($recentItems as $item): ?>
-                                <div class="recent-item">
-                                    <img src="<?= htmlspecialchars($item['poster_url'] ?: 'assets/images/placeholder.jpg') ?>" 
-                                         alt="<?= htmlspecialchars($item['title']) ?>"
-                                         onerror="this.src='assets/images/placeholder.jpg'">
-                                    <div class="recent-item-title"><?= htmlspecialchars(substr($item['title'], 0, 20)) ?></div>
-                                    <div class="recent-item-meta">
-                                        <?= htmlspecialchars($item['media_type']) ?><br>
-                                        <?= date('M j', strtotime($item['created_at'])) ?>
-                                    </div>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php else: ?>
-                        <div class="empty-state">
-                            <i class="fas fa-inbox"></i>
-                            <h3>No Items Yet</h3>
-                            <p>Start building your collection by adding your first item!</p>
-                            <a href="add.php" class="btn btn-primary" style="margin-top: 1rem;">
-                                <i class="fas fa-plus"></i> Add First Item
-                            </a>
-                        </div>
-                    <?php endif; ?>
-                </div>
-
-                <!-- Quick Actions -->
-                <div class="content-section">
-                    <h2 class="section-title">
-                        <i class="fas fa-bolt"></i> Quick Actions
-                    </h2>
-                    
-                    <div class="quick-actions">
-                        <div class="action-card" onclick="window.location.href='add.php'">
-                            <span class="action-icon">➕</span>
-                            <h4>Add Item</h4>
-                            <p>Manually add new media</p>
-                        </div>
-                        <div class="action-card" onclick="window.location.href='scan.php'">
-                            <span class="action-icon">📱</span>
-                            <h4>Scan Barcode</h4>
-                            <p>Quick barcode scanning</p>
-                        </div>
-                        <div class="action-card" onclick="window.location.href='wishlist.php'">
-                            <span class="action-icon">⭐</span>
-                            <h4>Wishlist</h4>
-                            <p>Manage wanted items</p>
-                        </div>
-                        <div class="action-card" onclick="window.location.href='categories.php'">
-                            <span class="action-icon">🏷️</span>
-                            <h4>Categories</h4>
-                            <p>Organize collection</p>
-                        </div>
-                        <div class="action-card" onclick="window.location.href='reports.php'">
-                            <span class="action-icon">📊</span>
-                            <h4>Reports</h4>
-                            <p>Collection analytics</p>
-                        </div>
-                        <div class="action-card" onclick="window.location.href='backup.php'">
-                            <span class="action-icon">💾</span>
-                            <h4>Backup</h4>
-                            <p>Export collection data</p>
-                        </div>
-                    </div>
-                </div>
+            
+            <div class="action-card">
+                <div class="action-icon">📊</div>
+                <div class="action-title">View Reports</div>
+                <div class="action-desc">Statistics and analytics</div>
+                <a href="user_stats.php" class="btn btn-primary">Reports</a>
             </div>
-        <?php else: ?>
-            <!-- System Not Ready -->
-            <div class="content-section">
-                <div class="empty-state">
-                    <i class="fas fa-exclamation-triangle"></i>
-                    <h3>System Setup Required</h3>
-                    <p>Please resolve the issues above to access your media collection dashboard.</p>
-                    
-                    <?php if (!$systemStatus['config']): ?>
-                        <div style="margin-top: 2rem; text-align: left; max-width: 600px; margin-left: auto; margin-right: auto;">
-                            <h4>Configuration Setup</h4>
-                            <ol>
-                                <li>Create <code>config.php</code> with database settings</li>
-                                <li>Set up database connection constants</li>
-                                <li>Configure authentication settings</li>
-                            </ol>
-                        </div>
-                    <?php endif; ?>
-                    
-                    <?php if (!$systemStatus['database']): ?>
-                        <div style="margin-top: 2rem; text-align: left; max-width: 600px; margin-left: auto; margin-right: auto;">
-                            <h4>Database Setup</h4>
-                            <ol>
-                                <li>Ensure MySQL/MariaDB is running</li>
-                                <li>Create the database schema</li>
-                                <li>Import the SQL tables</li>
-                                <li>Verify connection settings</li>
-                            </ol>
-                        </div>
-                    <?php endif; ?>
-                </div>
+            
+            <div class="action-card">
+                <div class="action-icon">💾</div>
+                <div class="action-title">Export Data</div>
+                <div class="action-desc">Backup your collection</div>
+                <a href="user_export.php" class="btn btn-primary">Export</a>
             </div>
-        <?php endif; ?>
-    </div>
+            
+            <div class="action-card">
+                <div class="action-icon">⚙️</div>
+                <div class="action-title">Settings</div>
+                <div class="action-desc">Configure your preferences</div>
+                <a href="user_settings.php" class="btn btn-primary">Settings</a>
+            </div>
+        </div>
 
-    <script>
-        // Dashboard functionality
-        document.addEventListener('DOMContentLoaded', function() {
-            console.log('📚 Media Collection Dashboard Loaded');
-            
-            <?php if (DEBUG_MODE): ?>
-            console.log('🔧 Debug Mode Active');
-            console.log('System Status:', <?= json_encode($systemStatus) ?>);
-            console.log('Statistics:', <?= json_encode($stats) ?>);
-            console.log('Recent Items:', <?= count($recentItems) ?>);
-            <?php endif; ?>
-            
-            // Auto-refresh stats every 5 minutes if system is ready
-            <?php if ($systemReady): ?>
-            setInterval(function() {
-                fetch('api/stats.php')
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            updateStats(data.stats);
-                        }
-                    })
-                    .catch(err => console.log('Stats refresh failed:', err));
-            }, 300000); // 5 minutes
-            <?php endif; ?>
-        });
-        
-        function updateStats(newStats) {
-            const statElements = document.querySelectorAll('.stat-number');
-            const statTypes = ['movies', 'books', 'comics', 'music', 'games', 'total_value', 'wishlist_items', 'total_items'];
-            
-            statElements.forEach((element, index) => {
-                if (statTypes[index] && newStats[statTypes[index]] !== undefined) {
-                    const value = newStats[statTypes[index]];
-                    const formattedValue = statTypes[index] === 'total_value' 
-                        ? ' + Number(value).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})
-                        : Number(value).toLocaleString();
-                    
-                    // Animate the change
-                    element.style.transform = 'scale(1.1)';
-                    element.style.color = '#27ae60';
-                    setTimeout(() => {
-                        element.textContent = formattedValue;
-                        element.style.transform = 'scale(1)';
-                        element.style.color = '#2c3e50';
-                    }, 200);
-                }
-            });
-        }
-        
-        // Handle quick action navigation
-        function navigateToAction(url) {
-            window.location.href = url;
-        }
-        
-        // Add keyboard shortcuts
-        document.addEventListener('keydown', function(e) {
-            if (e.ctrlKey || e.metaKey) {
-                switch(e.key) {
-                    case 'a':
-                        e.preventDefault();
-                        navigateToAction('add.php');
-                        break;
-                    case 's':
-                        e.preventDefault();
-                        navigateToAction('search.php');
-                        break;
-                    case 'w':
-                        e.preventDefault();
-                        navigateToAction('wishlist.php');
-                        break;
-                }
-            }
-        });
-        
-        // Service worker for offline capability (optional)
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js').then(function(registration) {
-                console.log('ServiceWorker registration successful');
-            }).catch(function(err) {
-                console.log('ServiceWorker registration failed');
-            });
-        }
-    </script>
-</body>
-</html>
+        <?php if (DEBUG_MODE): ?>
+        <div class="debug-info">
+            <strong>🔧 Debug Information:</strong><br>
+            Session ID: <?php echo session_id(); ?><br>
+            User: <?php echo htmlspecialchars($currentUser); ?><br>
+            Login Time: <?php echo isset($_SESSION['login_time']) ? date('Y-m-d H:i:s', $_SESSION['login_time'])
