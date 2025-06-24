@@ -1,6 +1,26 @@
-<?php
+        <!-- Quick Actions -->
+        <div class="quick-actions">
+            <div class="action-card">
+                <div class="action-icon">🔍</div>
+                <div class="action-title">Search Collection</div>
+                <div class="action-desc">Find items in your collection</div>
+                <a href="placeholder.php?page=user_search" class="btn btn-primary">Search</a>
+            </div>
+            
+            <div class="action-card">
+                <div class="action-icon">📊</div>
+                <div class="action-title">View Reports</div>
+                <div class="action-desc">Statistics and analytics</div>
+                <a href="placeholder.php?page=user_stats" class="btn btn-primary">Reports</a>
+            </div>
+            
+            <div class="action-card">
+                <div class="action-icon">💾</div>
+                <div class="action-title">Export Data</div>
+                <div class="action-desc">Backup your collection</div>
+                <?php
 /**
- * Enhanced Personal Media Management Dashboard
+ * Enhanced Personal Media Management Dashboard (FIXED)
  * File: public/enhanced_media_dashboard.php
  * Main dashboard with robust error handling and proper authentication flow
  */
@@ -35,12 +55,14 @@ function debugLog($message, $data = null) {
 }
 
 function safeInclude($file, $required = false) {
+    // FIXED: Updated paths to properly look in root directory from public folder
     $paths = [
-        $file,
-        __DIR__ . '/' . $file,
-        __DIR__ . '/../' . $file,
-        '../' . $file,
-        'config/' . $file
+        $file,                          // Current directory
+        __DIR__ . '/' . $file,         // Same directory as this file
+        __DIR__ . '/../' . $file,      // Parent directory (ROOT) - This is the key fix!
+        '../' . $file,                 // Relative parent
+        '../../' . $file,              // Two levels up
+        dirname(__DIR__) . '/' . $file // Parent directory using dirname
     ];
     
     foreach ($paths as $path) {
@@ -55,7 +77,7 @@ function safeInclude($file, $required = false) {
         }
     }
     
-    debugLog("File not found: " . $file);
+    debugLog("File not found: " . $file . " (tried paths: " . implode(', ', $paths) . ")");
     return false;
 }
 
@@ -84,19 +106,21 @@ $pdo = null;
 
 debugLog("Dashboard initialization started for user: " . ($_SESSION['admin_user'] ?? 'unknown'));
 
-// 1. Load Configuration
+// 1. Load Configuration - FIXED to handle missing config gracefully
 try {
-    if (safeInclude('config.php', true)) {
+    if (safeInclude('config.php')) {
         $systemStatus['config'] = true;
         debugLog("Configuration loaded successfully");
     } else {
-        $errors[] = "Configuration file (config.php) not found. Please check file structure.";
+        $errors[] = "Configuration file (config.php) not found in root directory. Please ensure config.php exists in the project root.";
+        debugLog("Config file search failed");
     }
 } catch (Exception $e) {
     $errors[] = "Configuration error: " . $e->getMessage();
+    debugLog("Config loading exception: " . $e->getMessage());
 }
 
-// 2. Database Connection
+// 2. Database Connection - Only try if config loaded
 if ($systemStatus['config']) {
     try {
         $dsn = "mysql:host=" . (defined('DB_HOST') ? DB_HOST : 'localhost') . 
@@ -121,16 +145,22 @@ if ($systemStatus['config']) {
         debugLog("Database connection successful");
         
         // Test database schema
-        $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-        debugLog("Available tables: " . implode(', ', $tables));
+        try {
+            $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+            debugLog("Available tables: " . implode(', ', $tables));
+        } catch (PDOException $e) {
+            debugLog("Cannot show tables (database may be empty): " . $e->getMessage());
+        }
         
     } catch (PDOException $e) {
         $errors[] = "Database connection failed: " . $e->getMessage();
         debugLog("Database error: " . $e->getMessage());
     }
+} else {
+    $errors[] = "Cannot connect to database: Configuration not loaded";
 }
 
-// 3. Load Statistics and Recent Items
+// 3. Load Statistics and Recent Items - Only if database connected
 if ($systemStatus['database']) {
     try {
         // Get collection statistics - handle missing tables gracefully
@@ -442,6 +472,28 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
             font-size: 0.9rem;
             margin-bottom: 1rem;
         }
+        
+        .setup-guide {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            padding: 2rem;
+            margin-top: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .setup-guide h3 {
+            color: #333;
+            margin-bottom: 1rem;
+        }
+        
+        .setup-guide ol {
+            margin-left: 1.5rem;
+        }
+        
+        .setup-guide li {
+            margin: 0.5rem 0;
+            color: #555;
+        }
     </style>
 </head>
 <body>
@@ -466,8 +518,8 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         </div>
         
         <div class="header-actions">
-            <a href="user_add_item.php" class="btn btn-primary">➕ Add Media</a>
-            <a href="user_scanner.php" class="btn btn-secondary">📱 Scan</a>
+            <a href="placeholder.php?page=user_add_item" class="btn btn-primary">➕ Add Media</a>
+            <a href="placeholder.php?page=user_scanner" class="btn btn-secondary">📱 Scan</a>
             <a href="?logout=1" class="btn btn-danger">🚪 Logout</a>
         </div>
     </header>
@@ -482,6 +534,18 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
                         <li>• <?php echo htmlspecialchars($error); ?></li>
                     <?php endforeach; ?>
                 </ul>
+                
+                <?php if (!$systemStatus['config']): ?>
+                    <div class="setup-guide">
+                        <h3>🔧 Configuration Setup Required</h3>
+                        <p>Your config.php file was not found. Please:</p>
+                        <ol>
+                            <li>Copy <code>public/config_template.php</code> to the root directory as <code>config.php</code></li>
+                            <li>Edit the database settings in config.php</li>
+                            <li>Ensure the file is in the same directory as index.php</li>
+                        </ol>
+                    </div>
+                <?php endif; ?>
             </div>
         <?php endif; ?>
 
@@ -574,7 +638,7 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
                 <div class="action-icon">💾</div>
                 <div class="action-title">Export Data</div>
                 <div class="action-desc">Backup your collection</div>
-                <a href="user_export.php" class="btn btn-primary">Export</a>
+                <a href="placeholder.php?page=user_export" class="btn btn-primary">Export</a>
             </div>
             
             <div class="action-card">
@@ -590,4 +654,13 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
             <strong>🔧 Debug Information:</strong><br>
             Session ID: <?php echo session_id(); ?><br>
             User: <?php echo htmlspecialchars($currentUser); ?><br>
-            Login Time: <?php echo isset($_SESSION['login_time']) ? date('Y-m-d H:i:s', $_SESSION['login_time'])
+            Login Time: <?php echo isset($_SESSION['login_time']) ? date('Y-m-d H:i:s', $_SESSION['login_time']) : 'Unknown'; ?><br>
+            Database Status: <?php echo $systemStatus['database'] ? 'Connected' : 'Disconnected'; ?><br>
+            Config Status: <?php echo $systemStatus['config'] ? 'Loaded' : 'Not Found'; ?><br>
+            Current File: <?php echo __FILE__; ?><br>
+            Root Directory: <?php echo dirname(__DIR__); ?>
+        </div>
+        <?php endif; ?>
+    </div>
+</body>
+</html>

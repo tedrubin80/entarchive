@@ -1,1077 +1,547 @@
 <?php
-// api/integrations/MediaAPIManager.php
+/**
+ * Complete Media API Manager
+ * File: api/integrations/MediaAPIManager.php
+ * Handles all external API integrations and poster downloads
+ */
+
 class MediaAPIManager {
     private $config;
-    private $cache;
+    private $cacheDir;
+    private $posterDir;
+    private $db;
+    private $errors = [];
+    private $debug = true;
     
-    public function __construct() {
+    public function __construct($pdo = null) {
+        $this->db = $pdo;
+        $this->loadConfig();
+        $this->initializeDirectories();
+    }
+    
+    /**
+     * Load API configuration from config file
+     */
+    private function loadConfig() {
+        $configFile = dirname(dirname(__DIR__)) . '/config/api_keys.php';
+        
+        // Load API keys if config file exists
+        if (file_exists($configFile)) {
+            require_once $configFile;
+        }
+        
         $this->config = [
-            'omdb_key' => OMDB_API_KEY,
-            'google_books_key' => GOOGLE_BOOKS_KEY,
-            'discogs_token' => DISCOGS_TOKEN,
-            'comicvine_key' => COMICVINE_KEY
+            'omdb' => [
+                'api_key' => defined('OMDB_API_KEY') ? OMDB_API_KEY : '',
+                'base_url' => 'http://www.omdbapi.com/',
+                'rate_limit' => 1000,
+                'cache_duration' => defined('API_CACHE_DURATION') ? API_CACHE_DURATION : 604800
+            ],
+            'tmdb' => [
+                'api_key' => defined('TMDB_API_KEY') ? TMDB_API_KEY : '',
+                'base_url' => 'https://api.themoviedb.org/3/',
+                'image_base' => 'https://image.tmdb.org/t/p/',
+                'rate_limit' => 1000,
+                'cache_duration' => defined('API_CACHE_DURATION') ? API_CACHE_DURATION : 604800
+            ],
+            'google_books' => [
+                'api_key' => defined('GOOGLE_BOOKS_API_KEY') ? GOOGLE_BOOKS_API_KEY : '',
+                'base_url' => 'https://www.googleapis.com/books/v1/',
+                'rate_limit' => 1000,
+                'cache_duration' => defined('API_CACHE_DURATION') ? API_CACHE_DURATION : 604800
+            ],
+            'poster' => [
+                'max_width' => defined('MAX_POSTER_WIDTH') ? MAX_POSTER_WIDTH : 500,
+                'max_height' => defined('MAX_POSTER_HEIGHT') ? MAX_POSTER_HEIGHT : 750,
+                'quality' => defined('POSTER_QUALITY') ? POSTER_QUALITY : 85
+            ]
         ];
-        $this->cache = new SimpleCache();
     }
     
     /**
-     * Main barcode/identifier lookup function
+     * Initialize directories
      */
-    public function lookupByIdentifier($identifier, $mediaType = null) {
-        $results = [];
+    private function initializeDirectories() {
+        $rootDir = dirname(dirname(__DIR__));
+        $this->cacheDir = $rootDir . '/cache/api/';
+        $this->posterDir = $rootDir . '/uploads/posters/';
         
-        // Determine what type of identifier this is
-        $identifierType = $this->detectIdentifierType($identifier);
+        // Create directories if they don't exist
+        $dirs = [
+            $this->cacheDir,
+            $this->posterDir,
+            $rootDir . '/uploads/',
+            $rootDir . '/cache/'
+        ];
         
-        switch ($identifierType) {
-            case 'isbn':
-                $results[] = $this->searchGoogleBooks($identifier);
+        foreach ($dirs as $dir) {
+            if (!is_dir($dir)) {
+                mkdir($dir, 0755, true);
+            }
+        }
+    }
+    
+    /**
+     * Main lookup function - searches all APIs for metadata and posters
+     */
+    public function lookupMedia($query, $mediaType = null, $year = null) {
+        $results = [
+            'query' => $query,
+            'media_type' => $mediaType,
+            'year' => $year,
+            'sources' => [],
+            'best_match' => null,
+            'posters' => [],
+            'success' => false
+        ];
+        
+        // Determine search strategy based on media type
+        switch (strtolower($mediaType)) {
+            case 'movie':
+            case 'tv':
+            case 'series':
+                $results['sources']['omdb'] = $this->searchOMDB($query, $year);
+                $results['sources']['tmdb'] = $this->searchTMDB($query, $year, $mediaType);
                 break;
-            case 'upc':
-                if (!$mediaType || $mediaType === 'movie') {
-                    $results[] = $this->searchOMDB('', '', $identifier);
-                }
-                if (!$mediaType || $mediaType === 'music') {
-                    $results[] = $this->searchDiscogs($identifier, 'barcode');
-                }
+                
+            case 'book':
+                $results['sources']['google_books'] = $this->searchGoogleBooks($query);
                 break;
-            case 'imdb':
-                $results[] = $this->searchOMDB('', '', '', $identifier);
+                
+            case 'music':
+            case 'album':
+                // Future: Add music APIs
                 break;
+                
+            case 'game':
+                // Future: Add IGDB integration
+                break;
+                
             default:
-                // Try all APIs if identifier type is unclear
-                if (!$mediaType || $mediaType === 'movie') {
-                    $results[] = $this->searchOMDB($identifier);
-                }
-                if (!$mediaType || $mediaType === 'book') {
-                    $results[] = $this->searchGoogleBooks($identifier);
-                }
-                if (!$mediaType || $mediaType === 'music') {
-                    $results[] = $this->searchDiscogs($identifier);
-                }
-                if (!$mediaType || $mediaType === 'comic') {
-                    $results[] = $this->searchComicVine($identifier);
-                }
+                // Search all available APIs
+                $results['sources']['omdb'] = $this->searchOMDB($query, $year);
+                $results['sources']['tmdb'] = $this->searchTMDB($query, $year);
+                $results['sources']['google_books'] = $this->searchGoogleBooks($query);
+                break;
         }
         
-        // Filter out null results and return best matches
-        $validResults = array_filter($results, function($result) {
-            return $result !== null && !empty($result);
-        });
+        // Find best match and collect posters
+        $results['best_match'] = $this->selectBestMatch($results['sources']);
+        $results['posters'] = $this->collectPosters($results['sources']);
+        $results['success'] = !empty($results['best_match']);
         
-        return [
-            'identifier' => $identifier,
-            'identifier_type' => $identifierType,
-            'results' => $validResults,
-            'best_match' => $this->selectBestMatch($validResults)
-        ];
+        return $results;
     }
     
     /**
-     * Search movies/TV via OMDB API
+     * Search OMDB API
      */
-    public function searchOMDB($title = '', $year = '', $upc = '', $imdbId = '') {
-        if (empty($this->config['omdb_key']) || $this->config['omdb_key'] === 'YOUR_OMDB_KEY') {
-            return null;
+    public function searchOMDB($title, $year = null, $imdbId = null) {
+        if (empty($this->config['omdb']['api_key'])) {
+            return ['error' => 'OMDB API key not configured'];
         }
         
-        $cacheKey = "omdb_" . md5($title . $year . $upc . $imdbId);
-        $cached = $this->cache->get($cacheKey);
-        if ($cached) return $cached;
+        $cacheKey = 'omdb_' . md5($title . $year . $imdbId);
         
-        $baseUrl = 'http://www.omdbapi.com/';
-        $params = ['apikey' => $this->config['omdb_key']];
+        // Check cache first
+        if ($cached = $this->getFromCache($cacheKey)) {
+            return $cached;
+        }
+        
+        $params = [
+            'apikey' => $this->config['omdb']['api_key'],
+            'plot' => 'full'
+        ];
         
         if ($imdbId) {
             $params['i'] = $imdbId;
-        } elseif ($upc) {
-            // OMDB doesn't directly support UPC, try title search
-            $params['s'] = $title ?: 'movie';
         } else {
             $params['t'] = $title;
             if ($year) $params['y'] = $year;
         }
         
-        $url = $baseUrl . '?' . http_build_query($params);
-        $response = $this->makeRequest($url);
+        $url = $this->config['omdb']['base_url'] . '?' . http_build_query($params);
+        $data = $this->makeApiCall($url);
         
-        if (!$response) return null;
-        
-        $data = json_decode($response, true);
-        if (!$data || $data['Response'] === 'False') return null;
-        
-        // If search results, get details for first result
-        if (isset($data['Search'])) {
-            $firstResult = $data['Search'][0];
-            return $this->searchOMDB('', '', '', $firstResult['imdbID']);
-        }
-        
-        $result = $this->formatOMDBResult($data);
-        $this->cache->set($cacheKey, $result, 86400); // Cache for 24 hours
-        
-        return $result;
-    }
-    
-    /**
-     * Search books via Google Books API
-     */
-    public function searchGoogleBooks($query, $searchType = 'isbn') {
-        if (empty($this->config['google_books_key']) || $this->config['google_books_key'] === 'YOUR_GOOGLE_BOOKS_KEY') {
-            return null;
-        }
-        
-        $cacheKey = "books_" . md5($query . $searchType);
-        $cached = $this->cache->get($cacheKey);
-        if ($cached) return $cached;
-        
-        $baseUrl = 'https://www.googleapis.com/books/v1/volumes';
-        
-        // Format query based on search type
-        if ($searchType === 'isbn') {
-            $searchQuery = 'isbn:' . $query;
-        } else {
-            $searchQuery = $query;
-        }
-        
-        $params = [
-            'q' => $searchQuery,
-            'key' => $this->config['google_books_key'],
-            'maxResults' => 1
-        ];
-        
-        $url = $baseUrl . '?' . http_build_query($params);
-        $response = $this->makeRequest($url);
-        
-        if (!$response) return null;
-        
-        $data = json_decode($response, true);
-        if (!$data || empty($data['items'])) return null;
-        
-        $result = $this->formatGoogleBooksResult($data['items'][0]);
-        $this->cache->set($cacheKey, $result, 86400);
-        
-        return $result;
-    }
-    
-    /**
-     * Search music via Discogs API
-     */
-    public function searchDiscogs($query, $searchType = 'title') {
-        if (empty($this->config['discogs_token']) || $this->config['discogs_token'] === 'YOUR_DISCOGS_TOKEN') {
-            return null;
-        }
-        
-        $cacheKey = "discogs_" . md5($query . $searchType);
-        $cached = $this->cache->get($cacheKey);
-        if ($cached) return $cached;
-        
-        $baseUrl = 'https://api.discogs.com/database/search';
-        
-        $params = [
-            'token' => $this->config['discogs_token'],
-            'per_page' => 1
-        ];
-        
-        if ($searchType === 'barcode') {
-            $params['barcode'] = $query;
-        } else {
-            $params['q'] = $query;
-            $params['type'] = 'release';
-        }
-        
-        $url = $baseUrl . '?' . http_build_query($params);
-        $response = $this->makeRequest($url, [
-            'User-Agent: MediaCollectionApp/1.0 +http://localhost'
-        ]);
-        
-        if (!$response) return null;
-        
-        $data = json_decode($response, true);
-        if (!$data || empty($data['results'])) return null;
-        
-        $result = $this->formatDiscogsResult($data['results'][0]);
-        $this->cache->set($cacheKey, $result, 86400);
-        
-        return $result;
-    }
-    
-    /**
-     * Search comics via ComicVine API
-     */
-    public function searchComicVine($query) {
-        if (empty($this->config['comicvine_key']) || $this->config['comicvine_key'] === 'YOUR_COMICVINE_KEY') {
-            return null;
-        }
-        
-        $cacheKey = "comicvine_" . md5($query);
-        $cached = $this->cache->get($cacheKey);
-        if ($cached) return $cached;
-        
-        $baseUrl = 'https://comicvine.gamespot.com/api/search/';
-        
-        $params = [
-            'api_key' => $this->config['comicvine_key'],
-            'format' => 'json',
-            'query' => $query,
-            'resources' => 'issue',
-            'limit' => 1
-        ];
-        
-        $url = $baseUrl . '?' . http_build_query($params);
-        $response = $this->makeRequest($url, [
-            'User-Agent: MediaCollectionApp/1.0'
-        ]);
-        
-        if (!$response) return null;
-        
-        $data = json_decode($response, true);
-        if (!$data || $data['status_code'] !== 1 || empty($data['results'])) return null;
-        
-        $result = $this->formatComicVineResult($data['results'][0]);
-        $this->cache->set($cacheKey, $result, 86400);
-        
-        return $result;
-    }
-    
-    /**
-     * Auto-detect identifier type
-     */
-    private function detectIdentifierType($identifier) {
-        // Remove any spaces or dashes
-        $clean = preg_replace('/[\s\-]/', '', $identifier);
-        
-        // ISBN (10 or 13 digits)
-        if (preg_match('/^\d{10}(\d{3})?$/', $clean)) {
-            return 'isbn';
-        }
-        
-        // IMDB ID
-        if (preg_match('/^tt\d+$/', $identifier)) {
-            return 'imdb';
-        }
-        
-        // UPC (12 digits)
-        if (preg_match('/^\d{12}$/', $clean)) {
-            return 'upc';
-        }
-        
-        // EAN (13 digits, but not ISBN)
-        if (preg_match('/^\d{13}$/', $clean) && !preg_match('/^97[89]/', $clean)) {
-            return 'ean';
-        }
-        
-        return 'unknown';
-    }
-    
-    /**
-     * Format OMDB API response
-     */
-    private function formatOMDBResult($data) {
-        return [
-            'media_type' => 'movie',
-            'source' => 'omdb',
-            'title' => $data['Title'] ?? '',
-            'year' => $data['Year'] ?? '',
-            'creator' => $data['Director'] ?? '',
-            'description' => $data['Plot'] ?? '',
-            'poster_url' => $data['Poster'] !== 'N/A' ? $data['Poster'] : null,
-            'external_id' => $data['imdbID'] ?? '',
-            'media_details' => [
+        if ($data && isset($data['Response']) && $data['Response'] === 'True') {
+            // Normalize the data
+            $normalized = [
+                'source' => 'omdb',
+                'title' => $data['Title'] ?? '',
+                'year' => $data['Year'] ?? '',
+                'plot' => $data['Plot'] ?? '',
+                'genre' => $data['Genre'] ?? '',
                 'director' => $data['Director'] ?? '',
-                'runtime_minutes' => $this->parseRuntime($data['Runtime'] ?? ''),
-                'mpaa_rating' => $data['Rated'] ?? '',
-                'studio' => $data['Production'] ?? '',
-                'original_language' => $data['Language'] ?? '',
-                'media_type_detail' => strtolower($data['Type'] ?? 'movie'),
-            ],
-            'categories' => $this->parseGenres($data['Genre'] ?? ''),
-            'additional_data' => $data
-        ];
+                'actors' => $data['Actors'] ?? '',
+                'poster' => $data['Poster'] ?? '',
+                'imdb_id' => $data['imdbID'] ?? '',
+                'imdb_rating' => $data['imdbRating'] ?? '',
+                'runtime' => $data['Runtime'] ?? '',
+                'raw_data' => $data
+            ];
+            
+            $this->saveToCache($cacheKey, $normalized);
+            return $normalized;
+        }
+        
+        return ['error' => 'OMDB search failed: ' . ($data['Error'] ?? 'Unknown error')];
     }
     
     /**
-     * Format Google Books API response
+     * Search TMDB API
      */
-    private function formatGoogleBooksResult($data) {
-        $volumeInfo = $data['volumeInfo'] ?? [];
+    public function searchTMDB($title, $year = null, $mediaType = 'movie') {
+        if (empty($this->config['tmdb']['api_key'])) {
+            return ['error' => 'TMDB API key not configured'];
+        }
         
-        return [
-            'media_type' => 'book',
-            'source' => 'google_books',
-            'title' => $volumeInfo['title'] ?? '',
-            'year' => $this->extractYear($volumeInfo['publishedDate'] ?? ''),
-            'creator' => implode(', ', $volumeInfo['authors'] ?? []),
-            'description' => $volumeInfo['description'] ?? '',
-            'poster_url' => $volumeInfo['imageLinks']['thumbnail'] ?? null,
-            'external_id' => $data['id'] ?? '',
-            'media_details' => [
-                'isbn' => $this->extractISBN($volumeInfo['industryIdentifiers'] ?? []),
-                'isbn13' => $this->extractISBN13($volumeInfo['industryIdentifiers'] ?? []),
+        $cacheKey = 'tmdb_' . md5($title . $year . $mediaType);
+        
+        // Check cache first
+        if ($cached = $this->getFromCache($cacheKey)) {
+            return $cached;
+        }
+        
+        $params = [
+            'api_key' => $this->config['tmdb']['api_key'],
+            'query' => $title,
+            'language' => 'en-US'
+        ];
+        
+        if ($year) $params['year'] = $year;
+        
+        $endpoint = $mediaType === 'tv' ? 'search/tv' : 'search/movie';
+        $url = $this->config['tmdb']['base_url'] . $endpoint . '?' . http_build_query($params);
+        
+        $data = $this->makeApiCall($url);
+        
+        if ($data && !empty($data['results'])) {
+            $result = $data['results'][0];
+            
+            // Get additional images for this item
+            $tmdbId = $result['id'];
+            $images = $this->getTMDBImages($tmdbId, $mediaType);
+            
+            $normalized = [
+                'source' => 'tmdb',
+                'title' => $result['title'] ?? $result['name'] ?? '',
+                'year' => substr($result['release_date'] ?? $result['first_air_date'] ?? '', 0, 4),
+                'plot' => $result['overview'] ?? '',
+                'poster' => $result['poster_path'] ? $this->config['tmdb']['image_base'] . 'w500' . $result['poster_path'] : '',
+                'backdrop' => $result['backdrop_path'] ? $this->config['tmdb']['image_base'] . 'w1280' . $result['backdrop_path'] : '',
+                'tmdb_id' => $tmdbId,
+                'rating' => $result['vote_average'] ?? '',
+                'genre_ids' => $result['genre_ids'] ?? [],
+                'images' => $images,
+                'raw_data' => $result
+            ];
+            
+            $this->saveToCache($cacheKey, $normalized);
+            return $normalized;
+        }
+        
+        return ['error' => 'TMDB search failed'];
+    }
+    
+    /**
+     * Get TMDB images
+     */
+    private function getTMDBImages($tmdbId, $mediaType = 'movie') {
+        $endpoint = $mediaType === 'tv' ? 'tv' : 'movie';
+        $url = $this->config['tmdb']['base_url'] . $endpoint . '/' . $tmdbId . '/images?api_key=' . $this->config['tmdb']['api_key'];
+        
+        $data = $this->makeApiCall($url);
+        
+        if ($data && !empty($data['posters'])) {
+            $images = [];
+            foreach (array_slice($data['posters'], 0, 5) as $poster) { // Limit to 5 posters
+                $images[] = [
+                    'url' => $this->config['tmdb']['image_base'] . 'w500' . $poster['file_path'],
+                    'url_large' => $this->config['tmdb']['image_base'] . 'original' . $poster['file_path'],
+                    'aspect_ratio' => $poster['aspect_ratio'],
+                    'vote_average' => $poster['vote_average']
+                ];
+            }
+            return $images;
+        }
+        
+        return [];
+    }
+    
+    /**
+     * Search Google Books API
+     */
+    public function searchGoogleBooks($query, $searchType = 'title') {
+        if (empty($this->config['google_books']['api_key'])) {
+            return ['error' => 'Google Books API key not configured'];
+        }
+        
+        $cacheKey = 'gbooks_' . md5($query . $searchType);
+        
+        // Check cache first
+        if ($cached = $this->getFromCache($cacheKey)) {
+            return $cached;
+        }
+        
+        $params = [
+            'key' => $this->config['google_books']['api_key'],
+            'q' => $searchType === 'isbn' ? 'isbn:' . $query : $query,
+            'maxResults' => 5
+        ];
+        
+        $url = $this->config['google_books']['base_url'] . 'volumes?' . http_build_query($params);
+        $data = $this->makeApiCall($url);
+        
+        if ($data && !empty($data['items'])) {
+            $result = $data['items'][0];
+            $volumeInfo = $result['volumeInfo'] ?? [];
+            
+            $normalized = [
+                'source' => 'google_books',
+                'title' => $volumeInfo['title'] ?? '',
+                'subtitle' => $volumeInfo['subtitle'] ?? '',
+                'authors' => $volumeInfo['authors'] ?? [],
                 'publisher' => $volumeInfo['publisher'] ?? '',
-                'publication_date' => $volumeInfo['publishedDate'] ?? '',
-                'page_count' => $volumeInfo['pageCount'] ?? null,
-                'language' => $volumeInfo['language'] ?? 'en',
-                'author' => implode(', ', $volumeInfo['authors'] ?? []),
-            ],
-            'categories' => $volumeInfo['categories'] ?? [],
-            'additional_data' => $data
-        ];
-    }
-    
-    /**
-     * Format Discogs API response
-     */
-    private function formatDiscogsResult($data) {
-        return [
-            'media_type' => 'music',
-            'source' => 'discogs',
-            'title' => $data['title'] ?? '',
-            'year' => $data['year'] ?? '',
-            'creator' => $data['artist'] ?? '',
-            'description' => '',
-            'poster_url' => $data['cover_image'] ?? null,
-            'external_id' => $data['id'] ?? '',
-            'media_details' => [
-                'artist' => $data['artist'] ?? '',
-                'record_label' => implode(', ', $data['label'] ?? []),
-                'catalog_number' => $data['catno'] ?? '',
-                'format' => $this->parseDiscogsFormat($data['format'] ?? []),
-                'genre' => implode(', ', $data['genre'] ?? []),
-                'album_type' => $data['type'] ?? 'release',
-            ],
-            'categories' => $data['genre'] ?? [],
-            'additional_data' => $data
-        ];
-    }
-    
-    /**
-     * Format ComicVine API response
-     */
-    private function formatComicVineResult($data) {
-        return [
-            'media_type' => 'comic',
-            'source' => 'comicvine',
-            'title' => $data['name'] ?? '',
-            'year' => $this->extractYear($data['date_added'] ?? ''),
-            'creator' => '',
-            'description' => strip_tags($data['description'] ?? ''),
-            'poster_url' => $data['image']['medium_url'] ?? null,
-            'external_id' => $data['id'] ?? '',
-            'media_details' => [
-                'issue_number' => $data['issue_number'] ?? '',
-                'volume_name' => $data['volume']['name'] ?? '',
-                'publisher' => '',
-                'cover_date' => $data['cover_date'] ?? '',
-            ],
-            'categories' => [],
-            'additional_data' => $data
-        ];
-    }
-    
-    /**
-     * Make HTTP request with error handling
-     */
-    private function makeRequest($url, $headers = []) {
-        $defaultHeaders = [
-            'Accept: application/json',
-            'User-Agent: MediaCollectionApp/1.0'
-        ];
+                'published_date' => $volumeInfo['publishedDate'] ?? '',
+                'description' => $volumeInfo['description'] ?? '',
+                'isbn' => $this->extractISBN($volumeInfo['industryIdentifiers'] ?? []),
+                'page_count' => $volumeInfo['pageCount'] ?? '',
+                'categories' => $volumeInfo['categories'] ?? [],
+                'language' => $volumeInfo['language'] ?? '',
+                'poster' => $volumeInfo['imageLinks']['thumbnail'] ?? '',
+                'poster_large' => $volumeInfo['imageLinks']['medium'] ?? $volumeInfo['imageLinks']['large'] ?? '',
+                'google_books_id' => $result['id'] ?? '',
+                'raw_data' => $result
+            ];
+            
+            $this->saveToCache($cacheKey, $normalized);
+            return $normalized;
+        }
         
-        $allHeaders = array_merge($defaultHeaders, $headers);
+        return ['error' => 'Google Books search failed'];
+    }
+    
+    /**
+     * Download and save poster
+     */
+    public function downloadPoster($imageUrl, $mediaType, $identifier, $title = '') {
+        if (empty($imageUrl) || $imageUrl === 'N/A') {
+            return false;
+        }
         
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_HTTPHEADER => $allHeaders,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS => 3
+        // Generate filename
+        $extension = $this->getImageExtension($imageUrl);
+        $safeId = preg_replace('/[^a-zA-Z0-9_-]/', '_', $identifier);
+        $filename = $mediaType . '_' . $safeId . '_' . time() . '.' . $extension;
+        $filepath = $this->posterDir . $filename;
+        
+        // Check if we already have this poster
+        $existingFile = $this->findExistingPoster($mediaType, $identifier);
+        if ($existingFile) {
+            return 'uploads/posters/' . basename($existingFile);
+        }
+        
+        // Download and process image
+        $imageData = $this->downloadImage($imageUrl);
+        if (!$imageData) {
+            return false;
+        }
+        
+        $processedImage = $this->processImage($imageData);
+        if (file_put_contents($filepath, $processedImage)) {
+            return 'uploads/posters/' . $filename;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Download image from URL
+     */
+    private function downloadImage($url) {
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 30,
+                'user_agent' => 'MediaCollection/1.0 (Poster Download)'
+            ]
         ]);
         
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-        
-        if ($error || $httpCode !== 200) {
-            error_log("API Request failed: {$url} - HTTP {$httpCode} - {$error}");
-            return null;
-        }
-        
-        return $response;
+        return @file_get_contents($url, false, $context);
     }
     
     /**
-     * Select best match from multiple API results
+     * Process and resize image
      */
-    private function selectBestMatch($results) {
-        if (empty($results)) return null;
+    private function processImage($imageData) {
+        if (!extension_loaded('gd')) {
+            return $imageData; // Return original if GD not available
+        }
         
-        // Simple scoring system - prioritize results with more complete data
-        $scored = array_map(function($result) {
-            $score = 0;
-            if (!empty($result['title'])) $score += 10;
-            if (!empty($result['year'])) $score += 5;
-            if (!empty($result['creator'])) $score += 5;
-            if (!empty($result['description'])) $score += 3;
-            if (!empty($result['poster_url'])) $score += 3;
-            if (!empty($result['media_details'])) $score += 2;
+        $image = @imagecreatefromstring($imageData);
+        if (!$image) {
+            return $imageData;
+        }
+        
+        $originalWidth = imagesx($image);
+        $originalHeight = imagesy($image);
+        
+        // Calculate new dimensions
+        $maxWidth = $this->config['poster']['max_width'];
+        $maxHeight = $this->config['poster']['max_height'];
+        
+        $ratio = min($maxWidth / $originalWidth, $maxHeight / $originalHeight);
+        
+        if ($ratio < 1) {
+            $newWidth = (int)($originalWidth * $ratio);
+            $newHeight = (int)($originalHeight * $ratio);
             
-            return ['result' => $result, 'score' => $score];
-        }, $results);
+            $resized = imagecreatetruecolor($newWidth, $newHeight);
+            imagecopyresampled($resized, $image, 0, 0, 0, 0, $newWidth, $newHeight, $originalWidth, $originalHeight);
+            
+            ob_start();
+            imagejpeg($resized, null, $this->config['poster']['quality']);
+            $processedData = ob_get_contents();
+            ob_end_clean();
+            
+            imagedestroy($image);
+            imagedestroy($resized);
+            
+            return $processedData;
+        }
         
-        // Sort by score descending
-        usort($scored, function($a, $b) {
-            return $b['score'] <=> $a['score'];
-        });
-        
-        return $scored[0]['result'];
+        imagedestroy($image);
+        return $imageData;
     }
     
-    // Helper functions
-    private function parseRuntime($runtime) {
-        if (preg_match('/(\d+)/', $runtime, $matches)) {
-            return (int)$matches[1];
+    /**
+     * Helper functions
+     */
+    private function makeApiCall($url) {
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 10,
+                'user_agent' => 'MediaCollection/1.0'
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return false;
         }
+        
+        return json_decode($response, true);
+    }
+    
+    private function getFromCache($key) {
+        if (!defined('ENABLE_API_CACHING') || !ENABLE_API_CACHING) {
+            return false;
+        }
+        
+        $cacheFile = $this->cacheDir . md5($key) . '.cache';
+        
+        if (file_exists($cacheFile)) {
+            $data = unserialize(file_get_contents($cacheFile));
+            
+            if ($data['expires'] > time()) {
+                return $data['content'];
+            } else {
+                unlink($cacheFile);
+            }
+        }
+        
+        return false;
+    }
+    
+    private function saveToCache($key, $data) {
+        if (!defined('ENABLE_API_CACHING') || !ENABLE_API_CACHING) {
+            return;
+        }
+        
+        $cacheFile = $this->cacheDir . md5($key) . '.cache';
+        $cacheData = [
+            'content' => $data,
+            'expires' => time() + $this->config['omdb']['cache_duration']
+        ];
+        
+        file_put_contents($cacheFile, serialize($cacheData));
+    }
+    
+    private function selectBestMatch($sources) {
+        // Priority: TMDB > OMDB > Google Books
+        if (isset($sources['tmdb']) && !isset($sources['tmdb']['error'])) {
+            return $sources['tmdb'];
+        }
+        
+        if (isset($sources['omdb']) && !isset($sources['omdb']['error'])) {
+            return $sources['omdb'];
+        }
+        
+        if (isset($sources['google_books']) && !isset($sources['google_books']['error'])) {
+            return $sources['google_books'];
+        }
+        
         return null;
     }
     
-    private function parseGenres($genres) {
-        return array_map('trim', explode(',', $genres));
-    }
-    
-    private function extractYear($date) {
-        if (preg_match('/(\d{4})/', $date, $matches)) {
-            return $matches[1];
+    private function collectPosters($sources) {
+        $posters = [];
+        
+        foreach ($sources as $source => $data) {
+            if (isset($data['poster']) && !empty($data['poster'])) {
+                $posters[] = [
+                    'source' => $source,
+                    'url' => $data['poster'],
+                    'large_url' => $data['poster_large'] ?? $data['poster'] ?? ''
+                ];
+            }
+            
+            if (isset($data['images'])) {
+                foreach ($data['images'] as $image) {
+                    $posters[] = [
+                        'source' => $source,
+                        'url' => $image['url'],
+                        'large_url' => $image['url_large'] ?? $image['url']
+                    ];
+                }
+            }
         }
-        return null;
+        
+        return $posters;
     }
     
     private function extractISBN($identifiers) {
-        foreach ($identifiers as $id) {
-            if ($id['type'] === 'ISBN_10') {
-                return $id['identifier'];
+        foreach ($identifiers as $identifier) {
+            if ($identifier['type'] === 'ISBN_13') {
+                return $identifier['identifier'];
             }
         }
-        return null;
-    }
-    
-    private function extractISBN13($identifiers) {
-        foreach ($identifiers as $id) {
-            if ($id['type'] === 'ISBN_13') {
-                return $id['identifier'];
+        foreach ($identifiers as $identifier) {
+            if ($identifier['type'] === 'ISBN_10') {
+                return $identifier['identifier'];
             }
         }
-        return null;
+        return '';
     }
     
-    private function parseDiscogsFormat($formats) {
-        if (empty($formats)) return 'cd';
-        
-        $format = strtolower($formats[0]);
-        $mapping = [
-            'vinyl' => 'vinyl_lp',
-            'cd' => 'cd',
-            'cassette' => 'cassette',
-            'digital' => 'digital'
-        ];
-        
-        return $mapping[$format] ?? 'cd';
+    private function getImageExtension($url) {
+        $path = parse_url($url, PHP_URL_PATH);
+        $ext = pathinfo($path, PATHINFO_EXTENSION);
+        return in_array(strtolower($ext), ['jpg', 'jpeg', 'png', 'gif', 'webp']) ? strtolower($ext) : 'jpg';
+    }
+    
+    private function findExistingPoster($mediaType, $identifier) {
+        $pattern = $this->posterDir . $mediaType . '_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $identifier) . '_*';
+        $files = glob($pattern);
+        return !empty($files) ? $files[0] : false;
+    }
+    
+    public function getErrors() {
+        return $this->errors;
+    }
+    
+    public function getLastError() {
+        return end($this->errors);
     }
 }
-
-// api/handlers/metadata_lookup.php
-require_once '../integrations/MediaAPIManager.php';
-
-class MetadataLookupAPI {
-    private $apiManager;
-    
-    public function __construct() {
-        $this->apiManager = new MediaAPIManager();
-    }
-    
-    public function handleRequest() {
-        $method = $_SERVER['REQUEST_METHOD'];
-        
-        if ($method !== 'GET' && $method !== 'POST') {
-            $this->sendError('Method not allowed', 405);
-            return;
-        }
-        
-        $action = $_GET['action'] ?? $_POST['action'] ?? '';
-        
-        switch ($action) {
-            case 'lookup':
-                $this->lookupMetadata();
-                break;
-            case 'search':
-                $this->searchMetadata();
-                break;
-            case 'barcode':
-                $this->barcodeSearch();
-                break;
-            default:
-                $this->sendError('Invalid action');
-        }
-    }
-    
-    private function lookupMetadata() {
-        $identifier = $_GET['identifier'] ?? $_POST['identifier'] ?? '';
-        $mediaType = $_GET['media_type'] ?? $_POST['media_type'] ?? null;
-        
-        if (empty($identifier)) {
-            $this->sendError('Identifier is required');
-            return;
-        }
-        
-        try {
-            $results = $this->apiManager->lookupByIdentifier($identifier, $mediaType);
-            
-            echo json_encode([
-                'success' => true,
-                'data' => $results
-            ]);
-            
-        } catch (Exception $e) {
-            $this->sendError('Lookup failed: ' . $e->getMessage());
-        }
-    }
-    
-    private function searchMetadata() {
-        $query = $_GET['q'] ?? $_POST['q'] ?? '';
-        $mediaType = $_GET['media_type'] ?? $_POST['media_type'] ?? '';
-        
-        if (empty($query)) {
-            $this->sendError('Search query is required');
-            return;
-        }
-        
-        try {
-            $results = [];
-            
-            switch ($mediaType) {
-                case 'movie':
-                    $results[] = $this->apiManager->searchOMDB($query);
-                    break;
-                case 'book':
-                    $results[] = $this->apiManager->searchGoogleBooks($query, 'title');
-                    break;
-                case 'music':
-                    $results[] = $this->apiManager->searchDiscogs($query);
-                    break;
-                case 'comic':
-                    $results[] = $this->apiManager->searchComicVine($query);
-                    break;
-                default:
-                    // Search all if no specific type
-                    $results[] = $this->apiManager->searchOMDB($query);
-                    $results[] = $this->apiManager->searchGoogleBooks($query, 'title');
-                    $results[] = $this->apiManager->searchDiscogs($query);
-                    $results[] = $this->apiManager->searchComicVine($query);
-            }
-            
-            $validResults = array_filter($results, function($result) {
-                return $result !== null;
-            });
-            
-            echo json_encode([
-                'success' => true,
-                'query' => $query,
-                'media_type' => $mediaType,
-                'results' => array_values($validResults)
-            ]);
-            
-        } catch (Exception $e) {
-            $this->sendError('Search failed: ' . $e->getMessage());
-        }
-    }
-    
-    private function barcodeSearch() {
-        $barcode = $_GET['barcode'] ?? $_POST['barcode'] ?? '';
-        
-        if (empty($barcode)) {
-            $this->sendError('Barcode is required');
-            return;
-        }
-        
-        try {
-            // Barcode lookup tries UPC/EAN across multiple APIs
-            $results = $this->apiManager->lookupByIdentifier($barcode);
-            
-            echo json_encode([
-                'success' => true,
-                'barcode' => $barcode,
-                'data' => $results
-            ]);
-            
-        } catch (Exception $e) {
-            $this->sendError('Barcode lookup failed: ' . $e->getMessage());
-        }
-    }
-    
-    private function sendError($message, $code = 400) {
-        http_response_code($code);
-        echo json_encode([
-            'success' => false,
-            'error' => $message
-        ]);
-    }
-}
-
-// Handle the request
-$api = new MetadataLookupAPI();
-$api->handleRequest();
-
-// api/barcode_scanner.php - Frontend interface for barcode scanning
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Barcode Scanner - Media Collection</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: #f5f7fa;
-        }
-        
-        .scanner-container {
-            max-width: 600px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 15px;
-            padding: 2rem;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-        }
-        
-        .scanner-header {
-            text-align: center;
-            margin-bottom: 2rem;
-        }
-        
-        .scanner-title {
-            font-size: 2rem;
-            color: #333;
-            margin-bottom: 0.5rem;
-        }
-        
-        .scanner-subtitle {
-            color: #666;
-        }
-        
-        #video {
-            width: 100%;
-            max-width: 400px;
-            height: 300px;
-            border-radius: 10px;
-            background: #000;
-            display: block;
-            margin: 0 auto 1rem;
-        }
-        
-        .scanner-controls {
-            display: flex;
-            gap: 1rem;
-            justify-content: center;
-            margin-bottom: 2rem;
-        }
-        
-        .btn {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 500;
-            transition: all 0.3s ease;
-        }
-        
-        .btn:hover {
-            background: #5a6fd8;
-            transform: translateY(-1px);
-        }
-        
-        .btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .manual-input {
-            margin-top: 2rem;
-            padding-top: 2rem;
-            border-top: 1px solid #e1e5e9;
-        }
-        
-        .input-group {
-            display: flex;
-            gap: 1rem;
-            margin-bottom: 1rem;
-        }
-        
-        .input-group input {
-            flex: 1;
-            padding: 12px;
-            border: 2px solid #e1e5e9;
-            border-radius: 8px;
-            font-size: 16px;
-        }
-        
-        .input-group input:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        
-        .result-container {
-            margin-top: 2rem;
-            padding: 1rem;
-            background: #f8f9fa;
-            border-radius: 8px;
-            display: none;
-        }
-        
-        .result-item {
-            background: white;
-            padding: 1rem;
-            border-radius: 8px;
-            margin-bottom: 1rem;
-            border-left: 4px solid #667eea;
-        }
-        
-        .result-title {
-            font-size: 1.2rem;
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 0.5rem;
-        }
-        
-        .result-meta {
-            color: #666;
-            margin-bottom: 1rem;
-        }
-        
-        .result-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-        
-        .btn-small {
-            background: #28a745;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.9rem;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 2rem;
-            color: #666;
-        }
-        
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 1rem;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
-</head>
-<body>
-    <div class="scanner-container">
-        <div class="scanner-header">
-            <h1 class="scanner-title">📱 Barcode Scanner</h1>
-            <p class="scanner-subtitle">Scan barcodes to automatically add items to your collection</p>
-        </div>
-        
-        <video id="video" playsinline></video>
-        
-        <div class="scanner-controls">
-            <button id="start-btn" class="btn" onclick="startScanner()">Start Camera</button>
-            <button id="stop-btn" class="btn" onclick="stopScanner()" disabled>Stop Camera</button>
-        </div>
-        
-        <div class="manual-input">
-            <h3>Manual Entry</h3>
-            <p>Or enter a barcode/identifier manually:</p>
-            
-            <div class="input-group">
-                <input type="text" id="manual-code" placeholder="Enter barcode, ISBN, UPC, or IMDB ID..." maxlength="20">
-                <button class="btn" onclick="lookupManual()">Lookup</button>
-            </div>
-            
-            <div class="input-group">
-                <select id="media-type-select">
-                    <option value="">Auto-detect</option>
-                    <option value="movie">Movie/TV</option>
-                    <option value="book">Book</option>
-                    <option value="comic">Comic</option>
-                    <option value="music">Music</option>
-                </select>
-            </div>
-        </div>
-        
-        <div id="result-container" class="result-container">
-            <!-- Results will be displayed here -->
-        </div>
-    </div>
-
-    <!-- Include QuaggaJS for barcode scanning -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
-    
-    <script>
-        let scanner = null;
-        let isScanning = false;
-
-        function startScanner() {
-            if (isScanning) return;
-            
-            // Check for camera support
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                alert('Camera not supported in this browser');
-                return;
-            }
-            
-            isScanning = true;
-            document.getElementById('start-btn').disabled = true;
-            document.getElementById('stop-btn').disabled = false;
-            
-            // Initialize QuaggaJS
-            Quagga.init({
-                inputStream: {
-                    name: "Live",
-                    type: "LiveStream",
-                    target: document.querySelector('#video'),
-                    constraints: {
-                        width: 400,
-                        height: 300,
-                        facingMode: "environment"
-                    }
-                },
-                decoder: {
-                    readers: [
-                        "code_128_reader",
-                        "ean_reader",
-                        "ean_8_reader",
-                        "code_39_reader",
-                        "code_39_vin_reader",
-                        "codabar_reader",
-                        "upc_reader",
-                        "upc_e_reader"
-                    ]
-                }
-            }, function(err) {
-                if (err) {
-                    console.error('QuaggaJS initialization failed:', err);
-                    alert('Failed to start camera: ' + err.message);
-                    stopScanner();
-                    return;
-                }
-                Quagga.start();
-            });
-            
-            // Listen for successful scans
-            Quagga.onDetected(onBarcodeDetected);
-        }
-
-        function stopScanner() {
-            if (!isScanning) return;
-            
-            isScanning = false;
-            document.getElementById('start-btn').disabled = false;
-            document.getElementById('stop-btn').disabled = true;
-            
-            if (Quagga) {
-                Quagga.stop();
-            }
-        }
-
-        function onBarcodeDetected(result) {
-            const code = result.codeResult.code;
-            console.log('Barcode detected:', code);
-            
-            // Stop scanner after successful detection
-            stopScanner();
-            
-            // Lookup the barcode
-            lookupCode(code);
-        }
-
-        function lookupManual() {
-            const code = document.getElementById('manual-code').value.trim();
-            const mediaType = document.getElementById('media-type-select').value;
-            
-            if (!code) {
-                alert('Please enter a barcode or identifier');
-                return;
-            }
-            
-            lookupCode(code, mediaType);
-        }
-
-        async function lookupCode(code, mediaType = '') {
-            const resultContainer = document.getElementById('result-container');
-            
-            // Show loading
-            resultContainer.style.display = 'block';
-            resultContainer.innerHTML = `
-                <div class="loading">
-                    <div class="spinner"></div>
-                    Looking up ${code}...
-                </div>
-            `;
-            
-            try {
-                const params = new URLSearchParams({
-                    action: 'lookup',
-                    identifier: code
-                });
-                
-                if (mediaType) {
-                    params.append('media_type', mediaType);
-                }
-                
-                const response = await fetch(`metadata_lookup.php?${params}`);
-                const data = await response.json();
-                
-                if (data.success && data.data.results.length > 0) {
-                    displayResults(data.data);
-                } else {
-                    resultContainer.innerHTML = `
-                        <div class="result-item">
-                            <div class="result-title">No Results Found</div>
-                            <div class="result-meta">
-                                Could not find information for: ${code}<br>
-                                Try entering the title manually or check if the barcode is correct.
-                            </div>
-                            <div class="result-actions">
-                                <button class="btn-small" onclick="addManually('${code}')">Add Manually</button>
-                            </div>
-                        </div>
-                    `;
-                }
-                
-            } catch (error) {
-                console.error('Lookup error:', error);
-                resultContainer.innerHTML = `
-                    <div class="result-item">
-                        <div class="result-title">Lookup Failed</div>
-                        <div class="result-meta">
-                            Error looking up ${code}: ${error.message}
-                        </div>
-                        <div class="result-actions">
-                            <button class="btn-small" onclick="lookupCode('${code}', '${mediaType}')">Try Again</button>
-                        </div>
-                    </div>
-                `;
-            }
-        }
-
-        function displayResults(data) {
-            const resultContainer = document.getElementById('result-container');
-            const results = data.results;
-            
-            let html = '<h3>Found Results:</h3>';
-            
-            results.forEach((result, index) => {
-                const mediaTypeIcons = {
-                    movie: '🎬',
-                    book: '📚',
-                    comic: '📖',
-                    music: '🎵'
-                };
-                
-                html += `
-                    <div class="result-item">
-                        <div class="result-title">
-                            ${mediaTypeIcons[result.media_type] || '📄'} ${result.title}
-                        </div>
-                        <div class="result-meta">
-                            ${result.creator ? `${result.creator} • ` : ''}
-                            ${result.year || 'Unknown Year'} • 
-                            ${result.source.toUpperCase()} • 
-                            ${result.media_type}
-                        </div>
-                        ${result.description ? `<p style="margin: 0.5rem 0; color: #666;">${result.description.substring(0, 200)}${result.description.length > 200 ? '...' : ''}</p>` : ''}
-                        <div class="result-actions">
-                            <button class="btn-small" onclick="addToCollection(${index})">
-                                Add to Collection
-                            </button>
-                            <button class="btn-small" style="background: #ffc107; color: #000;" onclick="addToWishlist(${index})">
-                                Add to Wishlist
-                            </button>
-                        </div>
-                    </div>
-                `;
-            });
-            
-            resultContainer.innerHTML = html;
-            
-            // Store results for later use
-            window.currentResults = results;
-        }
-
-        function addToCollection(index) {
-            const result = window.currentResults[index];
-            
-            // Create form data and submit to add item endpoint
-            const formData = {
-                action: 'add_item',
-                ...result,
-                source: 'barcode_scan'
-            };
-            
-            // Redirect to add form with pre-filled data
-            const params = new URLSearchParams(formData);
-            window.location.href = `../public/add.php?${params}`;
-        }
-
-        function addToWishlist(index) {
-            const result = window.currentResults[index];
-            
-            // Redirect to wishlist form with pre-filled data
-            const params = new URLSearchParams({
-                action: 'add_wishlist',
-                ...result,
-                source: 'barcode_scan'
-            });
-            
-            window.location.href = `../admin/wishlist.php?${params}`;
-        }
-
-        function addManually(code) {
-            // Redirect to manual add form
-            window.location.href = `../public/add.php?identifier=${code}`;
-        }
-
-        // Handle Enter key in manual input
-        document.getElementById('manual-code').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                lookupManual();
-            }
-        });
-
-        // Clean up scanner when page unloads
-        window.addEventListener('beforeunload', function() {
-            stopScanner();
-        });
-    </script>
-</body>
-</html>
