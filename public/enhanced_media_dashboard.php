@@ -1,40 +1,15 @@
-        <!-- Quick Actions -->
-        <div class="quick-actions">
-            <div class="action-card">
-                <div class="action-icon">🔍</div>
-                <div class="action-title">Search Collection</div>
-                <div class="action-desc">Find items in your collection</div>
-                <a href="placeholder.php?page=user_search" class="btn btn-primary">Search</a>
-            </div>
-            
-            <div class="action-card">
-                <div class="action-icon">📊</div>
-                <div class="action-title">View Reports</div>
-                <div class="action-desc">Statistics and analytics</div>
-                <a href="placeholder.php?page=user_stats" class="btn btn-primary">Reports</a>
-            </div>
-            
-            <div class="action-card">
-                <div class="action-icon">💾</div>
-                <div class="action-title">Export Data</div>
-                <div class="action-desc">Backup your collection</div>
-                <?php
+<?php
 /**
- * Enhanced Personal Media Management Dashboard (FIXED)
+ * Enhanced Personal Media Management Dashboard with RSS & Criterion Integration
  * File: public/enhanced_media_dashboard.php
- * Main dashboard with robust error handling and proper authentication flow
+ * Main dashboard with RSS feed and Criterion releases
  */
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-// Start session
 session_start();
 
-// Configuration - Debug mode for development
-define('DEBUG_MODE', true);
-define('ALLOW_DEMO_LOGIN', true); // Set false in production
-
-// Check authentication FIRST - redirect if not logged in
+// Check authentication
 if (!isset($_SESSION['admin_logged_in']) || !$_SESSION['admin_logged_in']) {
     header("Location: user_login.php");
     exit;
@@ -49,155 +24,176 @@ if (isset($_GET['logout'])) {
 
 // Helper functions
 function debugLog($message, $data = null) {
-    if (DEBUG_MODE) {
-        error_log("[DASHBOARD DEBUG] " . $message . ($data ? ' - ' . print_r($data, true) : ''));
-    }
+    error_log("[DASHBOARD] " . $message . ($data ? ' - ' . print_r($data, true) : ''));
 }
 
-function safeInclude($file, $required = false) {
-    // FIXED: Updated paths to properly look in root directory from public folder
-    $paths = [
-        $file,                          // Current directory
-        __DIR__ . '/' . $file,         // Same directory as this file
-        __DIR__ . '/../' . $file,      // Parent directory (ROOT) - This is the key fix!
-        '../' . $file,                 // Relative parent
-        '../../' . $file,              // Two levels up
-        dirname(__DIR__) . '/' . $file // Parent directory using dirname
-    ];
-    
+function safeInclude($file) {
+    $paths = [__DIR__ . '/../' . $file, '../' . $file, $file];
     foreach ($paths as $path) {
         if (file_exists($path)) {
-            if ($required) {
-                require_once $path;
-            } else {
-                include_once $path;
-            }
-            debugLog("Loaded file: " . $path);
+            include_once $path;
             return true;
         }
     }
-    
-    debugLog("File not found: " . $file . " (tried paths: " . implode(', ', $paths) . ")");
     return false;
 }
 
-// Initialize system status variables
-$systemStatus = [
-    'database' => false,
-    'auth' => true, // Already verified above
-    'config' => false,
-    'geo' => true // Default to true unless geo restrictions needed
-];
-
+// Initialize system status
+$systemStatus = ['database' => false, 'auth' => true, 'config' => false];
 $errors = [];
 $stats = [
-    'movies' => 0,
-    'books' => 0,
-    'comics' => 0,
-    'music' => 0,
-    'games' => 0,
-    'total_items' => 0,
-    'total_value' => 0,
-    'wishlist_items' => 0,
-    'recently_added' => 0
+    'movies' => 0, 'books' => 0, 'comics' => 0, 
+    'music' => 0, 'games' => 0, 'total_items' => 0,
+    'total_value' => 0, 'wishlist_items' => 0
 ];
-$recentItems = [];
-$pdo = null;
 
-debugLog("Dashboard initialization started for user: " . ($_SESSION['admin_user'] ?? 'unknown'));
-
-// 1. Load Configuration - FIXED to handle missing config gracefully
+// Load configuration
 try {
     if (safeInclude('config.php')) {
         $systemStatus['config'] = true;
-        debugLog("Configuration loaded successfully");
     } else {
-        $errors[] = "Configuration file (config.php) not found in root directory. Please ensure config.php exists in the project root.";
-        debugLog("Config file search failed");
+        $errors[] = "Configuration file not found";
     }
 } catch (Exception $e) {
     $errors[] = "Configuration error: " . $e->getMessage();
-    debugLog("Config loading exception: " . $e->getMessage());
 }
 
-// 2. Database Connection - Only try if config loaded
+// Database connection
+$pdo = null;
 if ($systemStatus['config']) {
     try {
         $dsn = "mysql:host=" . (defined('DB_HOST') ? DB_HOST : 'localhost') . 
-               ";dbname=" . (defined('DB_NAME') ? DB_NAME : 'media_collection') . 
-               ";charset=utf8mb4";
-        
-        $options = [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_TIMEOUT => 5,
-            PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4"
-        ];
-        
-        $pdo = new PDO(
-            $dsn,
-            defined('DB_USER') ? DB_USER : 'root',
-            defined('DB_PASS') ? DB_PASS : '',
-            $options
+               ";dbname=" . (defined('DB_NAME') ? DB_NAME : 'media_collection');
+        $pdo = new PDO($dsn, 
+            defined('DB_USER') ? DB_USER : 'root', 
+            defined('DB_PASS') ? DB_PASS : ''
         );
-        
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $systemStatus['database'] = true;
-        debugLog("Database connection successful");
-        
-        // Test database schema
-        try {
-            $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-            debugLog("Available tables: " . implode(', ', $tables));
-        } catch (PDOException $e) {
-            debugLog("Cannot show tables (database may be empty): " . $e->getMessage());
-        }
-        
     } catch (PDOException $e) {
         $errors[] = "Database connection failed: " . $e->getMessage();
-        debugLog("Database error: " . $e->getMessage());
     }
-} else {
-    $errors[] = "Cannot connect to database: Configuration not loaded";
 }
 
-// 3. Load Statistics and Recent Items - Only if database connected
+// Get statistics
 if ($systemStatus['database']) {
     try {
-        // Get collection statistics - handle missing tables gracefully
-        $statQueries = [
-            'movies' => "SELECT COUNT(*) FROM collection WHERE media_type = 'movie'",
-            'books' => "SELECT COUNT(*) FROM collection WHERE media_type = 'book'",
-            'comics' => "SELECT COUNT(*) FROM collection WHERE media_type = 'comic'",
-            'music' => "SELECT COUNT(*) FROM collection WHERE media_type = 'music'",
-            'games' => "SELECT COUNT(*) FROM collection WHERE media_type = 'game'",
-            'total_items' => "SELECT COUNT(*) FROM collection",
-            'total_value' => "SELECT COALESCE(SUM(CAST(current_value AS DECIMAL(10,2))), 0) FROM collection",
-            'wishlist_items' => "SELECT COUNT(*) FROM wishlist",
-            'recently_added' => "SELECT COUNT(*) FROM collection WHERE DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
-        ];
+        $sql = "SELECT 
+                    COUNT(CASE WHEN media_type = 'movie' THEN 1 END) as movies,
+                    COUNT(CASE WHEN media_type = 'book' THEN 1 END) as books,
+                    COUNT(CASE WHEN media_type = 'comic' THEN 1 END) as comics,
+                    COUNT(CASE WHEN media_type = 'music' THEN 1 END) as music,
+                    COUNT(CASE WHEN media_type = 'game' THEN 1 END) as games,
+                    COUNT(*) as total_items,
+                    COALESCE(SUM(current_value), 0) as total_value
+                FROM collection";
+        $stmt = $pdo->query($sql);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($result) {
+            $stats = array_merge($stats, $result);
+        }
+
+        // Get wishlist count
+        $wishlistStmt = $pdo->query("SELECT COUNT(*) as wishlist_items FROM wishlist WHERE date_acquired IS NULL");
+        $wishlistResult = $wishlistStmt->fetch(PDO::FETCH_ASSOC);
+        if ($wishlistResult) {
+            $stats['wishlist_items'] = $wishlistResult['wishlist_items'];
+        }
+    } catch (Exception $e) {
+        debugLog("Statistics error: " . $e->getMessage());
+    }
+}
+
+// RSS Feed Functions
+function fetchRSSFeed($url, $limit = 5) {
+    try {
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 10,
+                'user_agent' => 'Media Collection Dashboard/1.0'
+            ]
+        ]);
         
-        foreach ($statQueries as $key => $query) {
-            try {
-                $result = $pdo->query($query);
-                $stats[$key] = $result->fetchColumn() ?: 0;
-            } catch (PDOException $e) {
-                debugLog("Query failed for {$key}: " . $e->getMessage());
-                // Keep default value of 0
+        $rss = @file_get_contents($url, false, $context);
+        if (!$rss) {
+            return ['error' => 'Failed to fetch RSS feed'];
+        }
+        
+        $xml = @simplexml_load_string($rss);
+        if (!$xml) {
+            return ['error' => 'Invalid RSS format'];
+        }
+        
+        $items = [];
+        $count = 0;
+        
+        foreach ($xml->channel->item as $item) {
+            if ($count >= $limit) break;
+            
+            $items[] = [
+                'title' => (string)$item->title,
+                'link' => (string)$item->link,
+                'description' => strip_tags((string)$item->description),
+                'pubDate' => (string)$item->pubDate,
+                'date' => date('M j, Y', strtotime((string)$item->pubDate))
+            ];
+            $count++;
+        }
+        
+        return ['items' => $items];
+    } catch (Exception $e) {
+        return ['error' => 'RSS feed error: ' . $e->getMessage()];
+    }
+}
+
+// Criterion Collection API Integration
+function fetchCriterionReleases($limit = 5) {
+    try {
+        // Check if we have local Criterion data (from Node.js scraper)
+        $criterionFile = __DIR__ . '/../data/criterion_latest.json';
+        
+        if (file_exists($criterionFile)) {
+            $data = json_decode(file_get_contents($criterionFile), true);
+            if ($data && isset($data['films'])) {
+                return array_slice($data['films'], 0, $limit);
             }
         }
         
-        // Get recent items
-        try {
-            $recentQuery = "SELECT title, media_type, created_at FROM collection ORDER BY created_at DESC LIMIT 5";
-            $recentItems = $pdo->query($recentQuery)->fetchAll();
-        } catch (PDOException $e) {
-            debugLog("Recent items query failed: " . $e->getMessage());
-        }
-        
+        // Fallback: Mock data for demonstration
+        return [
+            [
+                'title' => 'The Rules of the Game',
+                'director' => 'Jean Renoir',
+                'spine_number' => '1234',
+                'release_date' => '2024-01-15',
+                'format' => 'Blu-ray',
+                'url' => 'https://www.criterion.com/films/123-the-rules-of-the-game'
+            ],
+            [
+                'title' => 'Seven Samurai',
+                'director' => 'Akira Kurosawa',
+                'spine_number' => '1235',
+                'release_date' => '2024-01-22',
+                'format' => '4K UHD',
+                'url' => 'https://www.criterion.com/films/124-seven-samurai'
+            ],
+            [
+                'title' => 'The 400 Blows',
+                'director' => 'François Truffaut',
+                'spine_number' => '1236',
+                'release_date' => '2024-02-01',
+                'format' => 'Blu-ray',
+                'url' => 'https://www.criterion.com/films/125-the-400-blows'
+            ]
+        ];
     } catch (Exception $e) {
-        $errors[] = "Statistics loading error: " . $e->getMessage();
+        return [];
     }
 }
+
+// Fetch data for widgets
+$rssData = fetchRSSFeed('https://www.the-numbers.com/news/rss.php', 4);
+$criterionReleases = fetchCriterionReleases(4);
 
 $currentUser = $_SESSION['admin_user'] ?? 'User';
 ?>
@@ -207,6 +203,7 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Media Collection Dashboard</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -223,52 +220,43 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         
         .header {
             background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            padding: 1rem 2rem;
-            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 1.5rem 2rem;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
-            gap: 1rem;
-        }
-        
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
         }
         
         .header h1 {
-            color: #333;
-            font-size: 1.8rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
+            font-size: 2rem;
+            color: #2c3e50;
+            margin-bottom: 0.5rem;
         }
         
-        .user-info {
-            background: #f8f9fa;
-            padding: 0.5rem 1rem;
-            border-radius: 20px;
+        .header-subtitle {
+            color: #7f8c8d;
             font-size: 0.9rem;
-            color: #495057;
         }
         
         .status-indicators {
             display: flex;
             gap: 0.5rem;
-            flex-wrap: wrap;
+            margin-top: 0.5rem;
         }
         
         .status-badge {
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 4px;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
         }
         
         .status-success {
@@ -284,22 +272,24 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         .header-actions {
             display: flex;
             gap: 0.5rem;
-            flex-wrap: wrap;
+            align-items: center;
         }
         
         .btn {
-            padding: 0.5rem 1rem;
+            padding: 0.75rem 1.5rem;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
+            font-weight: 600;
             text-decoration: none;
-            font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s ease;
-            font-size: 0.9rem;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
         }
         
         .btn-primary {
-            background: #007bff;
+            background: linear-gradient(135deg, #667eea, #764ba2);
             color: white;
         }
         
@@ -314,32 +304,23 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         }
         
         .btn:hover {
-            opacity: 0.9;
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
         
         .container {
-            max-width: 1200px;
-            margin: 2rem auto;
-            padding: 0 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
         }
         
         .error-panel {
-            background: rgba(248, 215, 218, 0.95);
+            background: #f8d7da;
             border: 1px solid #f5c6cb;
             border-radius: 8px;
-            padding: 1.5rem;
+            padding: 1rem;
             margin-bottom: 2rem;
-        }
-        
-        .error-list {
-            list-style: none;
-            margin: 1rem 0;
-        }
-        
-        .error-list li {
-            margin: 0.5rem 0;
-            padding-left: 1rem;
+            color: #721c24;
         }
         
         .stats-grid {
@@ -351,201 +332,266 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         
         .stat-card {
             background: rgba(255, 255, 255, 0.95);
-            border-radius: 12px;
-            padding: 1.5rem;
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 2rem;
             text-align: center;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            transition: transform 0.3s ease;
+            transition: transform 0.2s;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         }
         
         .stat-card:hover {
-            transform: translateY(-2px);
+            transform: translateY(-4px);
         }
         
         .stat-icon {
-            font-size: 2rem;
-            margin-bottom: 0.5rem;
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
         }
         
         .stat-number {
             font-size: 2rem;
             font-weight: bold;
-            color: #333;
-            margin-bottom: 0.25rem;
+            color: #2c3e50;
+            display: block;
+            margin-bottom: 0.5rem;
         }
         
         .stat-label {
-            color: #666;
+            color: #7f8c8d;
             font-size: 0.9rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .recent-items {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 12px;
-            padding: 1.5rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        
-        .recent-items h3 {
-            margin-bottom: 1rem;
-            color: #333;
-        }
-        
-        .recent-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0.75rem 0;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .recent-item:last-child {
-            border-bottom: none;
-        }
-        
-        .item-info {
-            flex-grow: 1;
-        }
-        
-        .item-title {
-            font-weight: 500;
-            color: #333;
-        }
-        
-        .item-type {
-            font-size: 0.8rem;
-            color: #666;
-            text-transform: capitalize;
-        }
-        
-        .item-date {
-            font-size: 0.8rem;
-            color: #999;
-        }
-        
-        .debug-info {
-            background: rgba(255, 243, 205, 0.95);
-            border: 1px solid #ffeaa7;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-top: 2rem;
-            font-size: 0.85rem;
-            color: #856404;
         }
         
         .quick-actions {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1rem;
-            margin-top: 2rem;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
         }
         
         .action-card {
             background: rgba(255, 255, 255, 0.95);
-            border-radius: 12px;
-            padding: 1.5rem;
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 2rem;
             text-align: center;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            transition: transform 0.3s ease;
+            transition: all 0.2s;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         }
         
         .action-card:hover {
-            transform: translateY(-2px);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
         }
         
         .action-icon {
-            font-size: 3rem;
+            font-size: 2rem;
             margin-bottom: 1rem;
+            display: block;
+            color: #667eea;
         }
         
-        .action-title {
-            font-size: 1.1rem;
-            font-weight: 600;
-            color: #333;
+        .action-card h3 {
+            color: #2c3e50;
             margin-bottom: 0.5rem;
         }
         
-        .action-desc {
-            color: #666;
+        .action-card p {
+            color: #7f8c8d;
             font-size: 0.9rem;
-            margin-bottom: 1rem;
         }
         
-        .setup-guide {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 12px;
-            padding: 2rem;
+        /* Widgets Section */
+        .widgets-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
             margin-top: 2rem;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
         
-        .setup-guide h3 {
-            color: #333;
-            margin-bottom: 1rem;
+        .widget {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         }
         
-        .setup-guide ol {
-            margin-left: 1.5rem;
+        .widget-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1.5rem;
         }
         
-        .setup-guide li {
-            margin: 0.5rem 0;
-            color: #555;
+        .widget-header i {
+            font-size: 1.5rem;
+            margin-right: 0.75rem;
+            color: #667eea;
+        }
+        
+        .widget-header h3 {
+            color: #2c3e50;
+            font-size: 1.25rem;
+        }
+        
+        .rss-item {
+            padding: 1rem 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .rss-item:last-child {
+            border-bottom: none;
+        }
+        
+        .rss-item h4 {
+            color: #2c3e50;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }
+        
+        .rss-item h4 a {
+            color: inherit;
+            text-decoration: none;
+        }
+        
+        .rss-item h4 a:hover {
+            color: #667eea;
+        }
+        
+        .rss-item p {
+            color: #6c757d;
+            font-size: 0.85rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .rss-date {
+            color: #adb5bd;
+            font-size: 0.8rem;
+        }
+        
+        .criterion-item {
+            display: flex;
+            align-items: center;
+            padding: 1rem 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .criterion-item:last-child {
+            border-bottom: none;
+        }
+        
+        .criterion-spine {
+            background: #667eea;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin-right: 1rem;
+            min-width: 60px;
+            text-align: center;
+        }
+        
+        .criterion-details {
+            flex: 1;
+        }
+        
+        .criterion-title {
+            color: #2c3e50;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        
+        .criterion-director {
+            color: #6c757d;
+            font-size: 0.9rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .criterion-format {
+            color: #adb5bd;
+            font-size: 0.8rem;
+        }
+        
+        .widget-error {
+            color: #dc3545;
+            text-align: center;
+            padding: 2rem;
+            font-style: italic;
+        }
+        
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                text-align: center;
+            }
+            
+            .header-actions {
+                margin-top: 1rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .quick-actions {
+                grid-template-columns: 1fr;
+            }
+            
+            .widgets-section {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
     <header class="header">
-        <div class="header-left">
-            <h1>📚 Media Collection</h1>
-            <div class="user-info">
-                👤 Welcome, <?php echo htmlspecialchars($currentUser); ?>
+        <div class="header-content">
+            <div>
+                <h1><i class="fas fa-film"></i> My Media Collection</h1>
+                <div class="header-subtitle">Personal Media Management System</div>
+                <div class="status-indicators">
+                    <span class="status-badge <?= $systemStatus['config'] ? 'status-success' : 'status-error' ?>">
+                        <i class="fas fa-<?= $systemStatus['config'] ? 'check' : 'times' ?>"></i> Config
+                    </span>
+                    <span class="status-badge <?= $systemStatus['database'] ? 'status-success' : 'status-error' ?>">
+                        <i class="fas fa-<?= $systemStatus['database'] ? 'database' : 'times' ?>"></i> Database
+                    </span>
+                    <span class="status-badge status-success">
+                        <i class="fas fa-user-check"></i> <?= $currentUser ?>
+                    </span>
+                </div>
             </div>
-        </div>
-        
-        <div class="status-indicators">
-            <span class="status-badge <?php echo $systemStatus['config'] ? 'status-success' : 'status-error'; ?>">
-                <?php echo $systemStatus['config'] ? '✓' : '✗'; ?> Config
-            </span>
-            <span class="status-badge <?php echo $systemStatus['database'] ? 'status-success' : 'status-error'; ?>">
-                <?php echo $systemStatus['database'] ? '✓' : '✗'; ?> Database
-            </span>
-            <span class="status-badge status-success">
-                ✓ Auth
-            </span>
-        </div>
-        
-        <div class="header-actions">
-            <a href="placeholder.php?page=user_add_item" class="btn btn-primary">➕ Add Media</a>
-            <a href="placeholder.php?page=user_scanner" class="btn btn-secondary">📱 Scan</a>
-            <a href="?logout=1" class="btn btn-danger">🚪 Logout</a>
+            
+            <div class="header-actions">
+                <a href="user_add_item.php" class="btn btn-primary">
+                    <i class="fas fa-plus"></i> Add Media
+                </a>
+                <a href="user_scanner.php" class="btn btn-secondary">
+                    <i class="fas fa-qrcode"></i> Scan
+                </a>
+                <a href="user_marketplace_sync.php" class="btn btn-secondary">
+                    <i class="fas fa-sync-alt"></i> Sync
+                </a>
+                <a href="?logout=1" class="btn btn-danger">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </a>
+            </div>
         </div>
     </header>
 
     <div class="container">
         <?php if (!empty($errors)): ?>
             <div class="error-panel">
-                <h2>🚨 System Status Issues</h2>
-                <p>The following issues were detected:</p>
-                <ul class="error-list">
+                <h3><i class="fas fa-exclamation-triangle"></i> System Issues</h3>
+                <ul>
                     <?php foreach ($errors as $error): ?>
-                        <li>• <?php echo htmlspecialchars($error); ?></li>
+                        <li><?= htmlspecialchars($error) ?></li>
                     <?php endforeach; ?>
                 </ul>
-                
-                <?php if (!$systemStatus['config']): ?>
-                    <div class="setup-guide">
-                        <h3>🔧 Configuration Setup Required</h3>
-                        <p>Your config.php file was not found. Please:</p>
-                        <ol>
-                            <li>Copy <code>public/config_template.php</code> to the root directory as <code>config.php</code></li>
-                            <li>Edit the database settings in config.php</li>
-                            <li>Ensure the file is in the same directory as index.php</li>
-                        </ol>
-                    </div>
-                <?php endif; ?>
             </div>
         <?php endif; ?>
 
@@ -553,114 +599,152 @@ $currentUser = $_SESSION['admin_user'] ?? 'User';
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-icon">🎬</div>
-                <div class="stat-number"><?php echo number_format($stats['movies']); ?></div>
+                <span class="stat-number"><?= number_format($stats['movies']) ?></span>
                 <div class="stat-label">Movies</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">📚</div>
-                <div class="stat-number"><?php echo number_format($stats['books']); ?></div>
+                <span class="stat-number"><?= number_format($stats['books']) ?></span>
                 <div class="stat-label">Books</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">📖</div>
-                <div class="stat-number"><?php echo number_format($stats['comics']); ?></div>
+                <span class="stat-number"><?= number_format($stats['comics']) ?></span>
                 <div class="stat-label">Comics</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">🎵</div>
-                <div class="stat-number"><?php echo number_format($stats['music']); ?></div>
+                <span class="stat-number"><?= number_format($stats['music']) ?></span>
                 <div class="stat-label">Music</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">🎮</div>
-                <div class="stat-number"><?php echo number_format($stats['games']); ?></div>
+                <span class="stat-number"><?= number_format($stats['games']) ?></span>
                 <div class="stat-label">Games</div>
             </div>
             
             <div class="stat-card">
                 <div class="stat-icon">💰</div>
-                <div class="stat-number">$<?php echo number_format($stats['total_value'], 2); ?></div>
+                <span class="stat-number">$<?= number_format($stats['total_value'], 2) ?></span>
                 <div class="stat-label">Total Value</div>
             </div>
-            
-            <div class="stat-card">
-                <div class="stat-icon">⭐</div>
-                <div class="stat-number"><?php echo number_format($stats['wishlist_items']); ?></div>
-                <div class="stat-label">Wishlist</div>
-            </div>
-            
-            <div class="stat-card">
-                <div class="stat-icon">🆕</div>
-                <div class="stat-number"><?php echo number_format($stats['recently_added']); ?></div>
-                <div class="stat-label">This Week</div>
-            </div>
         </div>
-
-        <!-- Recent Items -->
-        <?php if (!empty($recentItems)): ?>
-        <div class="recent-items">
-            <h3>📋 Recently Added Items</h3>
-            <?php foreach ($recentItems as $item): ?>
-            <div class="recent-item">
-                <div class="item-info">
-                    <div class="item-title"><?php echo htmlspecialchars($item['title']); ?></div>
-                    <div class="item-type"><?php echo htmlspecialchars($item['media_type']); ?></div>
-                </div>
-                <div class="item-date">
-                    <?php echo date('M j, Y', strtotime($item['created_at'])); ?>
-                </div>
-            </div>
-            <?php endforeach; ?>
-        </div>
-        <?php endif; ?>
 
         <!-- Quick Actions -->
         <div class="quick-actions">
-            <div class="action-card">
-                <div class="action-icon">🔍</div>
-                <div class="action-title">Search Collection</div>
-                <div class="action-desc">Find items in your collection</div>
-                <a href="user_search.php" class="btn btn-primary">Search</a>
-            </div>
+            <a href="user_collection.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-th-large"></i></span>
+                <h3>View Collection</h3>
+                <p>Browse your media library</p>
+            </a>
             
-            <div class="action-card">
-                <div class="action-icon">📊</div>
-                <div class="action-title">View Reports</div>
-                <div class="action-desc">Statistics and analytics</div>
-                <a href="user_stats.php" class="btn btn-primary">Reports</a>
-            </div>
+            <a href="user_wishlist.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-heart"></i></span>
+                <h3>Wishlist (<?= $stats['wishlist_items'] ?>)</h3>
+                <p>Items you want to acquire</p>
+            </a>
             
-            <div class="action-card">
-                <div class="action-icon">💾</div>
-                <div class="action-title">Export Data</div>
-                <div class="action-desc">Backup your collection</div>
-                <a href="placeholder.php?page=user_export" class="btn btn-primary">Export</a>
-            </div>
+            <a href="user_search.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-search"></i></span>
+                <h3>Search</h3>
+                <p>Find specific items</p>
+            </a>
             
-            <div class="action-card">
-                <div class="action-icon">⚙️</div>
-                <div class="action-title">Settings</div>
-                <div class="action-desc">Configure your preferences</div>
-                <a href="user_settings.php" class="btn btn-primary">Settings</a>
-            </div>
+            <a href="user_reports.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-chart-bar"></i></span>
+                <h3>Reports</h3>
+                <p>Collection analytics</p>
+            </a>
+            
+            <a href="user_settings.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-cog"></i></span>
+                <h3>Settings</h3>
+                <p>Configure your account</p>
+            </a>
+            
+            <a href="user_security_settings.php" class="action-card">
+                <span class="action-icon"><i class="fas fa-shield-alt"></i></span>
+                <h3>Security</h3>
+                <p>2FA & account security</p>
+            </a>
         </div>
 
-        <?php if (DEBUG_MODE): ?>
-        <div class="debug-info">
-            <strong>🔧 Debug Information:</strong><br>
-            Session ID: <?php echo session_id(); ?><br>
-            User: <?php echo htmlspecialchars($currentUser); ?><br>
-            Login Time: <?php echo isset($_SESSION['login_time']) ? date('Y-m-d H:i:s', $_SESSION['login_time']) : 'Unknown'; ?><br>
-            Database Status: <?php echo $systemStatus['database'] ? 'Connected' : 'Disconnected'; ?><br>
-            Config Status: <?php echo $systemStatus['config'] ? 'Loaded' : 'Not Found'; ?><br>
-            Current File: <?php echo __FILE__; ?><br>
-            Root Directory: <?php echo dirname(__DIR__); ?>
+        <!-- Bottom Widgets -->
+        <div class="widgets-section">
+            <!-- Left Widget: RSS Feed -->
+            <div class="widget">
+                <div class="widget-header">
+                    <i class="fas fa-rss"></i>
+                    <h3>Movie Industry News</h3>
+                </div>
+                
+                <?php if (isset($rssData['error'])): ?>
+                    <div class="widget-error">
+                        <i class="fas fa-exclamation-circle"></i>
+                        <?= htmlspecialchars($rssData['error']) ?>
+                    </div>
+                <?php else: ?>
+                    <?php foreach ($rssData['items'] as $item): ?>
+                        <div class="rss-item">
+                            <h4><a href="<?= htmlspecialchars($item['link']) ?>" target="_blank"><?= htmlspecialchars($item['title']) ?></a></h4>
+                            <p><?= htmlspecialchars(substr($item['description'], 0, 120)) ?>...</p>
+                            <div class="rss-date"><?= htmlspecialchars($item['date']) ?></div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+            
+            <!-- Right Widget: Criterion Collection -->
+            <div class="widget">
+                <div class="widget-header">
+                    <i class="fas fa-award"></i>
+                    <h3>Latest Criterion Releases</h3>
+                </div>
+                
+                <?php if (empty($criterionReleases)): ?>
+                    <div class="widget-error">
+                        <i class="fas fa-film"></i>
+                        No Criterion releases data available
+                    </div>
+                <?php else: ?>
+                    <?php foreach ($criterionReleases as $film): ?>
+                        <div class="criterion-item">
+                            <div class="criterion-spine">#<?= htmlspecialchars($film['spine_number']) ?></div>
+                            <div class="criterion-details">
+                                <div class="criterion-title"><?= htmlspecialchars($film['title']) ?></div>
+                                <div class="criterion-director">Directed by <?= htmlspecialchars($film['director']) ?></div>
+                                <div class="criterion-format"><?= htmlspecialchars($film['format']) ?> • <?= date('M Y', strtotime($film['release_date'])) ?></div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
         </div>
-        <?php endif; ?>
     </div>
+
+    <script>
+        // Auto-refresh widgets every 30 minutes
+        setTimeout(() => {
+            window.location.reload();
+        }, 1800000);
+        
+        // Add loading states for action cards
+        document.querySelectorAll('.action-card').forEach(card => {
+            card.addEventListener('click', function(e) {
+                if (!this.href.includes('php')) return;
+                
+                const icon = this.querySelector('.action-icon i');
+                icon.className = 'fas fa-spinner fa-spin';
+                
+                setTimeout(() => {
+                    icon.className = icon.className.replace('fa-spinner fa-spin', 'fa-check');
+                }, 500);
+            });
+        });
+    </script>
 </body>
 </html>
