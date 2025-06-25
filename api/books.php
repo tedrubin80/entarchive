@@ -1,1 +1,0 @@
-<?php echo json_encode(['source' => 'Google Books API placeholder']); ?>
